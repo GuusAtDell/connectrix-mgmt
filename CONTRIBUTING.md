@@ -1,6 +1,6 @@
-# Contributing to Connectrix SAN Zoning Automation
+# Contributing to Connectrix SAN Management Automation
 
-Thank you for your interest in contributing! This project aims to simplify SAN zoning automation for Dell Connectrix (Brocade and Cisco) switches, and community contributions are essential to making it better.
+Thank you for your interest in contributing! This project aims to simplify SAN management automation for Dell Connectrix (Brocade and Cisco) switches, and community contributions are essential to making it better.
 
 ---
 

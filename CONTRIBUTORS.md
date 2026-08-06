@@ -1,6 +1,6 @@
 # Contributors
 
-Thank you to everyone who has contributed to the Connectrix SAN Zoning Automation project!
+Thank you to everyone who has contributed to the Connectrix SAN Management Automation project!
 
 ---
 
@@ -61,5 +61,5 @@ The following platforms have been tested by contributors. If you test on a new p
 
 ## Acknowledgments
 
-- This project was inspired by the need to automate repetitive SAN zoning tasks during Dell Connectrix switch deployments
+- This project was inspired by the need to automate repetitive SAN management tasks during Dell Connectrix switch deployments
 - Thanks to the Brocade FOS and Cisco NX-OS documentation teams for comprehensive CLI references

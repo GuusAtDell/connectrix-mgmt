@@ -1,4 +1,4 @@
-# Connectrix SAN Zoning Automation
+# Connectrix SAN Management Automation
 
 Automated, file-driven zoning scripts for **Dell Connectrix** (Brocade and Cisco) Fibre Channel switches.
 
