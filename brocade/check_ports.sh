@@ -9,8 +9,7 @@
 #   4. WWN login verification (are all aliases.txt WWNs logged in?)
 #
 # PREREQUISITES:
-#   - sshpass  (apt install sshpass / yum install sshpass)
-#   - For Windows: use WSL, Git Bash with sshpass, or Cygwin
+#   - For Windows: use WSL, Git Bash, or Cygwin
 #
 # USAGE:
 #   chmod +x check_ports.sh
@@ -52,7 +51,7 @@ set -euo pipefail
 # ========================= DEFAULTS ===================================
 SWITCH_IP=""
 SWITCH_USER="admin"
-SWITCH_PASS='Password123!'
+SSH_KEY=""
 DRY_RUN=false
 LOG_FILE="portcheck_$(date +%Y%m%d_%H%M%S).log"
 
@@ -85,17 +84,17 @@ WWN_MISSING=0
 # ========================= PARSE ARGUMENTS ============================
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run)       DRY_RUN=true;            shift ;;
+        --dry-run)       DRY_RUN=true;             shift ;;
         --switch-ip)     SWITCH_IP="$2";           shift 2 ;;
         --switch-user)   SWITCH_USER="$2";         shift 2 ;;
-        --switch-pass)   SWITCH_PASS="$2";         shift 2 ;;
+        --ssh-key)       SSH_KEY="$2";             shift 2 ;;
         --ports)         EXPECTED_PORTS="$2";      shift 2 ;;
         --port-file)     PORT_FILE="$2";           shift 2 ;;
         --alias-file)    ALIAS_FILE="$2";          shift 2 ;;
-        --rx-warn)       RX_WARN_DBM="$2";        shift 2 ;;
-        --rx-crit)       RX_CRIT_DBM="$2";        shift 2 ;;
-        --tx-warn)       TX_WARN_DBM="$2";        shift 2 ;;
-        --tx-crit)       TX_CRIT_DBM="$2";        shift 2 ;;
+        --rx-warn)       RX_WARN_DBM="$2";         shift 2 ;;
+        --rx-crit)       RX_CRIT_DBM="$2";         shift 2 ;;
+        --tx-warn)       TX_WARN_DBM="$2";         shift 2 ;;
+        --tx-crit)       TX_CRIT_DBM="$2";         shift 2 ;;
         --log-file)      LOG_FILE="$2";            shift 2 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -110,14 +109,14 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Optional:"
             echo "  --dry-run              Print commands without executing"
-            echo "  --switch-user USER     SSH username             (default: admin)"
-            echo "  --switch-pass PASS     SSH password             (default: ********)"
+            echo "  --switch-user USER     SSH username                (default: admin)"
+            echo "  --ssh-key FILE         SSH Identity to use         (default: ~/.ssh/id_ed25519)"
             echo "  --alias-file FILE      Alias file for WWN login verification"
             echo "  --rx-warn DBM          RX power warning threshold  (default: ${RX_WARN_DBM})"
             echo "  --rx-crit DBM          RX power critical threshold (default: ${RX_CRIT_DBM})"
             echo "  --tx-warn DBM          TX power warning threshold  (default: ${TX_WARN_DBM})"
             echo "  --tx-crit DBM          TX power critical threshold (default: ${TX_CRIT_DBM})"
-            echo "  --log-file FILE        Log output file          (default: auto-timestamped)"
+            echo "  --log-file FILE        Log output file             (default: auto-timestamped)"
             echo "  -h, --help             Show this help"
             exit 0
             ;;
@@ -145,6 +144,21 @@ log_raw() {
 }
 
 # ========================= SSH HELPERS ================================
+build_ssh_cmd() {
+    local -a ssh_cmd=(ssh
+        -o BatchMode=yes
+        -o ConnectTimeout=15
+        -o LogLevel=ERROR
+    )
+
+    if [[ -n "$SSH_KEY" ]]; then
+        ssh_cmd+=(-i "$SSH_KEY")
+    fi
+
+    ssh_cmd+=("${SWITCH_USER}@${SWITCH_IP}")
+    printf '%s\n' "${ssh_cmd[@]}"
+}
+
 run_cmd() {
     local cmd="$1"
     local description="${2:-}"
@@ -156,41 +170,8 @@ run_cmd() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" "$cmd" 2>&1) || {
-            log "!!! COMMAND FAILED: $cmd"
-            log "!!! Output: $output"
-            return 1
-        }
-        echo "$output"
-        return 0
-    else
-        echo "(dry-run: no output)"
-        return 0
-    fi
-}
-
-run_cmd_confirm() {
-    local cmd="$1"
-    local description="${2:-}"
-
-    if [[ -n "$description" ]]; then
-        log "# $description"
-    fi
-    log ">>> $cmd (with auto-confirm 'y')"
-
-    if [[ "$DRY_RUN" == false ]]; then
-        local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" "$cmd" <<< "y" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" "$cmd" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             return 1
@@ -247,17 +228,6 @@ if [[ -n "$ALIAS_FILE" ]]; then
 fi
 echo "============================================================"
 echo ""
-
-# Verify sshpass
-if [[ "$DRY_RUN" == false ]]; then
-    if ! command -v sshpass &> /dev/null; then
-        echo "ERROR: sshpass is not installed."
-        echo "  Debian/Ubuntu : sudo apt install sshpass"
-        echo "  RHEL/CentOS   : sudo yum install sshpass"
-        echo "  macOS         : brew install hudochenkov/sshpass/sshpass"
-        exit 1
-    fi
-fi
 
 # Verify optional input files exist
 if [[ -n "$PORT_FILE" && ! -f "$PORT_FILE" ]]; then

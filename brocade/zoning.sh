@@ -29,8 +29,7 @@
 #       (zone members can span multiple lines; semicolons separate them)
 #
 # PREREQUISITES:
-#   - sshpass  (apt install sshpass / yum install sshpass)
-#   - For Windows: use WSL, Git Bash with sshpass, or Cygwin
+#   - For Windows: use WSL, Git Bash, or Cygwin
 #
 # USAGE:
 #   chmod +x zone_brocade.sh
@@ -108,6 +107,22 @@ log() {
 }
 
 # ========================= SSH HELPERS ================================
+
+build_ssh_cmd() {
+    local -a ssh_cmd=(ssh
+        -o BatchMode=yes
+        -o ConnectTimeout=15
+        -o LogLevel=ERROR
+    )
+
+    if [[ -n "$SSH_KEY" ]]; then
+        ssh_cmd+=(-i "$SSH_KEY")
+    fi
+
+    ssh_cmd+=("${SWITCH_USER}@${SWITCH_IP}")
+    printf '%s\n' "${ssh_cmd[@]}"
+}
+
 run_cmd() {
     local cmd="$1"
     local description="${2:-}"
@@ -117,14 +132,10 @@ run_cmd() {
     fi
     log ">>> $cmd"
 
-    if [[ "$DRY_RUN" == false ]]; then
+        if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" "$cmd" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" "$cmd" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             log "!!! Aborting script."
@@ -149,23 +160,20 @@ run_cmd_confirm() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" "$cmd" <<< "y" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" "$cmd" <<< "y" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             log "!!! Aborting script."
             exit 1
         }
         if [[ -n "$output" ]]; then
-			log $output
+            log "$output"
         fi
         sleep 2
     fi
-    log "" | tee -a "$LOG_FILE"
+
+    log ""
 }
 
 # ========================= UTILITY: TRIM WHITESPACE ===================
@@ -205,15 +213,6 @@ if [[ "$MISSING" == true ]]; then
 fi
 
 if [[ "$DRY_RUN" == false ]]; then
-    if ! command -v sshpass &> /dev/null; then
-        log "ERROR: sshpass is not installed."
-        log "  Debian/Ubuntu : sudo apt install sshpass"
-        log "  RHEL/CentOS   : sudo yum install sshpass"
-        log "  macOS         : brew install hudochenkov/sshpass/sshpass"
-        log "  Windows WSL   : sudo apt install sshpass"
-        exit 1
-    fi
-
     log "Testing SSH connectivity to ${SWITCH_IP}..."
     run_cmd "switchstatusshow" "Pre-flight: verify connectivity and switch health"
 
