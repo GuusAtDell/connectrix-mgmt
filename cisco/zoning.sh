@@ -12,23 +12,21 @@
 #
 # FILE FORMATS:
 #   aliases.txt:
-#     alias: <alias_name>
-#     <wwn>
+#     alias:
 #
 #   zones.txt:
-#     zone: <zone_name>
-#     <member1>; <member2>; <member3>;
-#     <member4>; <member5>
+#     zone:
+#     ; ; ;
+#     ;
 #
 #   config.txt:
-#     cfg: <zoneset_name>
-#     <zone1>;
-#     <zone2>;
-#     <zone3>
+#     cfg:
+#     ;
+#     ;
 #
-# PREREQUISITES:
-#   - sshpass  (apt install sshpass / yum install sshpass)
-#   - For Windows: use WSL, Git Bash with sshpass, or Cygwin
+# AUTHENTICATION:
+#   - SSH key only. Password authentication is intentionally disabled.
+#   - Supports an optional identity file via --ssh-key.
 #
 # USAGE:
 #   chmod +x zone_cisco.sh
@@ -38,7 +36,7 @@
 #       --switch-name myswitch \
 #       --switch-ip 192.168.0.1 \
 #       --switch-user admin \
-#       --switch-pass 'MyPassword!' \
+#       --ssh-key ~/.ssh/id_ed25519 \
 #       --vsan 100 \
 #       --alias-file site2_aliases.txt \
 #       --zone-file site2_zones.txt \
@@ -52,7 +50,7 @@
 #
 # NOTES:
 #   - This script assumes ENHANCED zoning mode is active on the switch.
-#     Enhanced zoning uses 'zone commit vsan <v>' to apply changes atomically.
+#     Enhanced zoning uses 'zone commit vsan' to apply changes atomically.
 #   - If using BASIC zoning mode, remove/skip the 'zone commit' command
 #     and rely on 'copy running-config startup-config' only.
 #   - Device-aliases are VSAN-independent (fabric-wide); zones and zonesets
@@ -65,7 +63,7 @@ set -euo pipefail
 SWITCH_NAME="someswitch"
 SWITCH_IP="192.168.0.1"
 SWITCH_USER="admin"
-SWITCH_PASS='Password123!'
+SSH_KEY=""
 VSAN="1"
 ALIAS_FILE="aliases.txt"
 ZONE_FILE="zones.txt"
@@ -80,7 +78,7 @@ while [[ $# -gt 0 ]]; do
         --switch-name)   SWITCH_NAME="$2";   shift 2 ;;
         --switch-ip)     SWITCH_IP="$2";     shift 2 ;;
         --switch-user)   SWITCH_USER="$2";   shift 2 ;;
-        --switch-pass)   SWITCH_PASS="$2";   shift 2 ;;
+        --ssh-key)       SSH_KEY="$2";       shift 2 ;;
         --vsan)          VSAN="$2";          shift 2 ;;
         --alias-file)    ALIAS_FILE="$2";    shift 2 ;;
         --zone-file)     ZONE_FILE="$2";     shift 2 ;;
@@ -93,13 +91,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --dry-run              Print commands without executing"
             echo "  --switch-name NAME     Switch name            (default: ${SWITCH_NAME})"
             echo "  --switch-ip IP         Switch IP address      (default: ${SWITCH_IP})"
-            echo "  --switch-user USER     SSH username            (default: ${SWITCH_USER})"
-            echo "  --switch-pass PASS     SSH password            (default: ********)"
-            echo "  --vsan VSAN            VSAN ID for zoning      (default: ${VSAN})"
-            echo "  --alias-file FILE      Alias input file        (default: ${ALIAS_FILE})"
-            echo "  --zone-file FILE       Zone input file         (default: ${ZONE_FILE})"
-            echo "  --cfg-file FILE        Zoneset input file      (default: ${CFG_FILE})"
-            echo "  --log-file FILE        Log output file         (default: auto-timestamped)"
+            echo "  --switch-user USER     SSH username           (default: ${SWITCH_USER})"
+            echo "  --ssh-key FILE         SSH private key file"
+            echo "  --vsan VSAN            VSAN ID for zoning     (default: ${VSAN})"
+            echo "  --alias-file FILE      Alias input file       (default: ${ALIAS_FILE})"
+            echo "  --zone-file FILE       Zone input file        (default: ${ZONE_FILE})"
+            echo "  --cfg-file FILE        Zoneset input file     (default: ${CFG_FILE})"
+            echo "  --log-file FILE        Log output file        (default: auto-timestamped)"
             echo "  -h, --help             Show this help"
             exit 0
             ;;
@@ -117,6 +115,23 @@ log() {
 }
 
 # ========================= SSH HELPERS ================================
+build_ssh_cmd() {
+    local -a ssh_cmd=(ssh
+        -o BatchMode=yes
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout=15
+        -o LogLevel=ERROR
+    )
+
+    if [[ -n "$SSH_KEY" ]]; then
+        ssh_cmd+=(-i "$SSH_KEY")
+    fi
+
+    ssh_cmd+=("${SWITCH_USER}@${SWITCH_IP}")
+    printf '%s\n' "${ssh_cmd[@]}"
+}
+
 # Run a show/exec command (non-config mode)
 run_cmd() {
     local cmd="$1"
@@ -129,13 +144,8 @@ run_cmd() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" \
-            "terminal length 0 ; ${cmd}" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             log "!!! Aborting script."
@@ -159,7 +169,6 @@ run_config_block() {
         log "# $description"
     fi
 
-    # Log each command for audit trail
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         log ">>> (config) $line"
@@ -167,12 +176,8 @@ run_config_block() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" << CISCO_CONFIG_EOF
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" <<CISCO_CONFIG_EOF
 terminal length 0
 configure terminal
 ${cmds}
@@ -204,13 +209,8 @@ run_cmd_confirm() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" \
-            "terminal length 0 ; ${cmd}" <<< "y" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$(printf 'y\n' | "${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             log "!!! Aborting script."
@@ -241,6 +241,7 @@ else
 fi
 log "======================================================================"
 log "  Switch     : ${SWITCH_NAME} (IP: ${SWITCH_IP}; user: ${SWITCH_USER})"
+log "  SSH Key    : ${SSH_KEY:-default ssh agent / keychain}"
 log "  VSAN       : ${VSAN}"
 log "  Alias File : ${ALIAS_FILE}"
 log "  Zone File  : ${ZONE_FILE}"
@@ -249,7 +250,6 @@ log "  Log File   : ${LOG_FILE}"
 log "======================================================================"
 log ""
 
-# Verify all input files exist
 MISSING=false
 for f in "$ALIAS_FILE" "$ZONE_FILE" "$CFG_FILE"; do
     if [[ ! -f "$f" ]]; then
@@ -261,16 +261,17 @@ if [[ "$MISSING" == true ]]; then
     exit 1
 fi
 
-if [[ "$DRY_RUN" == false ]]; then
-    if ! command -v sshpass &> /dev/null; then
-        log "ERROR: sshpass is not installed."
-        log "  Debian/Ubuntu : sudo apt install sshpass"
-        log "  RHEL/CentOS   : sudo yum install sshpass"
-        log "  macOS         : brew install hudochenkov/sshpass/sshpass"
-        log "  Windows WSL   : sudo apt install sshpass"
-        exit 1
-    fi
+if ! command -v ssh >/dev/null 2>&1; then
+    log "ERROR: ssh is not installed or not in PATH."
+    exit 1
+fi
 
+if [[ -n "$SSH_KEY" && ! -f "$SSH_KEY" ]]; then
+    log "ERROR: SSH key file not found: ${SSH_KEY}"
+    exit 1
+fi
+
+if [[ "$DRY_RUN" == false ]]; then
     log "Testing SSH connectivity to ${SWITCH_IP}..."
     run_cmd "show switchname" "Pre-flight: verify connectivity"
     run_cmd "show zone status vsan ${VSAN}" "Pre-flight: verify VSAN ${VSAN} zoning status"
@@ -282,7 +283,6 @@ fi
 
 log "========== Script started =========="
 
-
 # ======================================================================
 # STEP 1: PARSE AND CREATE DEVICE-ALIASES
 # ======================================================================
@@ -292,7 +292,6 @@ declare -A CREATED_ALIASES
 ALIAS_NAME=""
 ALIAS_COUNT=0
 
-# Build the device-alias config block
 DEVALIAS_CONFIG="device-alias database"
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -323,7 +322,6 @@ if [[ -n "$ALIAS_NAME" ]]; then
     exit 1
 fi
 
-# Close the device-alias database block and commit
 DEVALIAS_CONFIG+=$'\n'"exit"
 DEVALIAS_CONFIG+=$'\n'"device-alias commit"
 
@@ -332,7 +330,6 @@ run_config_block "$DEVALIAS_CONFIG" \
 
 log "  Device-aliases created: ${ALIAS_COUNT}"
 log ""
-
 
 # ======================================================================
 # STEP 2: PARSE, VALIDATE, AND CREATE ZONES
@@ -345,7 +342,6 @@ ZONE_MEMBERS_RAW=""
 ZONE_COUNT=0
 VALIDATION_ERRORS=0
 
-# Build the zone config block
 ZONE_CONFIG=""
 
 process_zone() {
@@ -376,7 +372,6 @@ process_zone() {
     fi
 
     if [[ $VALIDATION_ERRORS -eq 0 ]]; then
-        # Build zone config block for NX-OS
         ZONE_CONFIG+="zone name ${z_name} vsan ${VSAN}"$'\n'
         for m in "${members_array[@]}"; do
             ZONE_CONFIG+="  member device-alias ${m}"$'\n'
@@ -414,7 +409,6 @@ if [[ $VALIDATION_ERRORS -gt 0 ]]; then
     exit 1
 fi
 
-# Send zone config block
 if [[ -n "$ZONE_CONFIG" ]]; then
     run_config_block "$ZONE_CONFIG" \
         "Create ${ZONE_COUNT} zones in VSAN ${VSAN}"
@@ -422,7 +416,6 @@ fi
 
 log "  Zones created: ${ZONE_COUNT}"
 log ""
-
 
 # ======================================================================
 # STEP 3: PARSE, VALIDATE, AND CREATE ZONESET
@@ -453,7 +446,6 @@ if [[ -z "$CFG_NAME" ]]; then
     exit 1
 fi
 
-# Normalize and validate
 CFG_MEMBERS_NORMALIZED=$(echo "$CFG_MEMBERS_RAW" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
 
 VALIDATION_ERRORS=0
@@ -489,7 +481,6 @@ run_config_block "$ZONESET_CONFIG" \
 log "  Zoneset created: ${CFG_NAME} with ${CFG_COUNT} zones"
 log ""
 
-
 # ======================================================================
 # STEP 4: COMMIT ZONE DATABASE
 # ======================================================================
@@ -508,7 +499,6 @@ if [[ "$DRY_RUN" == false ]]; then
 fi
 
 run_cmd "zone commit vsan ${VSAN}" "Commit zone database for VSAN ${VSAN}"
-
 
 # ======================================================================
 # STEP 5: ACTIVATE ZONESET
@@ -530,7 +520,6 @@ fi
 run_config_block "zoneset activate name ${CFG_NAME} vsan ${VSAN}" \
     "Activate zoneset: ${CFG_NAME} in VSAN ${VSAN}"
 
-
 # ======================================================================
 # STEP 6: SAVE CONFIGURATION
 # ======================================================================
@@ -538,7 +527,6 @@ log "============ STEP 6: SAVE CONFIGURATION ============"
 
 run_cmd_confirm "copy running-config startup-config" \
     "Save running config to startup (persistent)"
-
 
 # ======================================================================
 # STEP 7: VERIFY

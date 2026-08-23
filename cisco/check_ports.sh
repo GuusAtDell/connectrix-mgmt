@@ -1,6 +1,6 @@
 #!/bin/bash
 ##############################################################################
-# Cisco MDS Switch Port & SFP Health Check Script
+# Cisco MDS Switch Port & SFP Health Check Script (SSH key only)
 #
 # Cisco NX-OS equivalent of check_ports.sh (Brocade). Connects to a
 # Cisco MDS switch via SSH and performs:
@@ -10,15 +10,18 @@
 #   4. Port error counter check
 #   5. WWN login verification via flogi database (optional)
 #
-# PREREQUISITES:
-#   - sshpass  (apt install sshpass / yum install sshpass)
-#   - For Windows: use WSL, Git Bash with sshpass, or Cygwin
+# AUTHENTICATION:
+#   - SSH key only. Password authentication is intentionally disabled.
+#   - Supports an optional identity file via --ssh-key.
 #
 # USAGE:
 #   chmod +x check_ports_cisco.sh
 #
 #   # Auto-detect up ports from show interface brief
 #   ./check_ports_cisco.sh --switch-ip 10.154.81.7
+#
+#   # Specify SSH key explicitly
+#   ./check_ports_cisco.sh --switch-ip 10.154.81.7 --ssh-key ~/.ssh/id_ed25519
 #
 #   # Specify expected ports (comma-separated, Cisco format)
 #   ./check_ports_cisco.sh --switch-ip 10.154.81.7 \
@@ -54,7 +57,7 @@ set -euo pipefail
 # ========================= DEFAULTS ===================================
 SWITCH_IP=""
 SWITCH_USER="admin"
-SWITCH_PASS='Password123!'
+SSH_KEY=""
 VSAN="1"
 DRY_RUN=false
 LOG_FILE="portcheck_cisco_$(date +%Y%m%d_%H%M%S).log"
@@ -88,15 +91,15 @@ while [[ $# -gt 0 ]]; do
         --dry-run)       DRY_RUN=true;            shift ;;
         --switch-ip)     SWITCH_IP="$2";           shift 2 ;;
         --switch-user)   SWITCH_USER="$2";         shift 2 ;;
-        --switch-pass)   SWITCH_PASS="$2";         shift 2 ;;
+        --ssh-key)       SSH_KEY="$2";             shift 2 ;;
         --vsan)          VSAN="$2";                shift 2 ;;
         --ports)         EXPECTED_PORTS="$2";      shift 2 ;;
         --port-file)     PORT_FILE="$2";           shift 2 ;;
         --alias-file)    ALIAS_FILE="$2";          shift 2 ;;
-        --rx-warn)       RX_WARN_DBM="$2";        shift 2 ;;
-        --rx-crit)       RX_CRIT_DBM="$2";        shift 2 ;;
-        --tx-warn)       TX_WARN_DBM="$2";        shift 2 ;;
-        --tx-crit)       TX_CRIT_DBM="$2";        shift 2 ;;
+        --rx-warn)       RX_WARN_DBM="$2";         shift 2 ;;
+        --rx-crit)       RX_CRIT_DBM="$2";         shift 2 ;;
+        --tx-warn)       TX_WARN_DBM="$2";         shift 2 ;;
+        --tx-crit)       TX_CRIT_DBM="$2";         shift 2 ;;
         --log-file)      LOG_FILE="$2";            shift 2 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -112,7 +115,7 @@ while [[ $# -gt 0 ]]; do
             echo "Optional:"
             echo "  --dry-run              Print commands without executing"
             echo "  --switch-user USER     SSH username             (default: ${SWITCH_USER})"
-            echo "  --switch-pass PASS     SSH password             (default: ********)"
+            echo "  --ssh-key FILE         SSH private key file"
             echo "  --vsan VSAN            VSAN for flogi lookup    (default: ${VSAN})"
             echo "  --alias-file FILE      Alias file for WWN verification"
             echo "  --rx-warn DBM          RX warning threshold     (default: ${RX_WARN_DBM})"
@@ -146,6 +149,23 @@ log_raw() {
 }
 
 # ========================= SSH HELPERS ================================
+build_ssh_cmd() {
+    local -a ssh_cmd=(ssh
+        -o BatchMode=yes
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout=15
+        -o LogLevel=ERROR
+    )
+
+    if [[ -n "$SSH_KEY" ]]; then
+        ssh_cmd+=(-i "$SSH_KEY")
+    fi
+
+    ssh_cmd+=("${SWITCH_USER}@${SWITCH_IP}")
+    printf '%s\n' "${ssh_cmd[@]}"
+}
+
 run_cmd() {
     local cmd="$1"
     local description="${2:-}"
@@ -157,13 +177,8 @@ run_cmd() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" \
-            "terminal length 0 ; ${cmd}" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$("${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             return 1
@@ -187,13 +202,8 @@ run_cmd_confirm() {
 
     if [[ "$DRY_RUN" == false ]]; then
         local output
-        output=$(sshpass -p "${SWITCH_PASS}" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=15 \
-            -o LogLevel=ERROR \
-            "${SWITCH_USER}@${SWITCH_IP}" \
-            "terminal length 0 ; ${cmd}" <<< "y" 2>&1) || {
+        mapfile -t ssh_cmd < <(build_ssh_cmd)
+        output=$(printf 'y\n' | "${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
             log "!!! COMMAND FAILED: $cmd"
             log "!!! Output: $output"
             return 1
@@ -227,6 +237,7 @@ else
 fi
 echo "============================================================"
 echo "  Switch       : ${SWITCH_IP} (user: ${SWITCH_USER})"
+echo "  SSH Key      : ${SSH_KEY:-default ssh agent / keychain}"
 echo "  VSAN         : ${VSAN}"
 echo "  Log File     : ${LOG_FILE}"
 echo "  RX Thresholds: WARN < ${RX_WARN_DBM} dBm, CRIT < ${RX_CRIT_DBM} dBm"
@@ -244,14 +255,14 @@ fi
 echo "============================================================"
 echo ""
 
-if [[ "$DRY_RUN" == false ]]; then
-    if ! command -v sshpass &> /dev/null; then
-        echo "ERROR: sshpass is not installed."
-        echo "  Debian/Ubuntu : sudo apt install sshpass"
-        echo "  RHEL/CentOS   : sudo yum install sshpass"
-        echo "  macOS         : brew install hudochenkov/sshpass/sshpass"
-        exit 1
-    fi
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "ERROR: ssh is not installed or not in PATH."
+    exit 1
+fi
+
+if [[ -n "$SSH_KEY" && ! -f "$SSH_KEY" ]]; then
+    echo "ERROR: SSH key file not found: ${SSH_KEY}"
+    exit 1
 fi
 
 if [[ -n "$PORT_FILE" && ! -f "$PORT_FILE" ]]; then
@@ -264,7 +275,6 @@ if [[ -n "$ALIAS_FILE" && ! -f "$ALIAS_FILE" ]]; then
 fi
 
 log "========== Cisco MDS Port & SFP Health Check Started =========="
-
 
 # ======================================================================
 # STEP 1: COLLECT show interface brief OUTPUT
@@ -286,7 +296,6 @@ else
     log ""
 fi
 
-
 # ======================================================================
 # STEP 2: DETERMINE PORT LIST
 # ======================================================================
@@ -296,14 +305,8 @@ declare -A EXPECTED_PORT_MAP
 declare -A UP_PORT_MAP
 declare -A PORT_VSAN_MAP
 
-# Parse 'show interface brief' to find up ports
-# Typical output line:
-#   fc1/1       1     F-port   auto    8G     up        --       trunk
-#   fc1/2       1     F-port   auto    16G    up        --       trunk
-#   fc1/3       --    --       auto    --     down      sfpAbsent --
 if [[ "$DRY_RUN" == false && -n "$INTF_BRIEF_OUTPUT" ]]; then
     while IFS= read -r line; do
-        # Match fc interface lines
         if [[ "$line" =~ ^[[:space:]]*(fc[0-9]+/[0-9]+)[[:space:]]+([0-9-]+)[[:space:]]+([A-Za-z_-]+)[[:space:]]+([a-zA-Z0-9]+)[[:space:]]+([0-9GMK-]+)[[:space:]]+([a-zA-Z]+) ]]; then
             local_intf="${BASH_REMATCH[1]}"
             local_vsan="${BASH_REMATCH[2]}"
@@ -320,7 +323,6 @@ if [[ "$DRY_RUN" == false && -n "$INTF_BRIEF_OUTPUT" ]]; then
     log "  Total up: ${#UP_PORT_MAP[@]}"
 fi
 
-# Build expected port list
 if [[ -n "$EXPECTED_PORTS" ]]; then
     IFS=',' read -ra PORT_ARRAY <<< "$EXPECTED_PORTS"
     for p in "${PORT_ARRAY[@]}"; do
@@ -329,7 +331,6 @@ if [[ -n "$EXPECTED_PORTS" ]]; then
         EXPECTED_PORT_MAP["$p"]=1
     done
     log "  Expected ports (from --ports): ${!EXPECTED_PORT_MAP[*]}"
-
 elif [[ -n "$PORT_FILE" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
         line=$(trim "$line")
@@ -337,7 +338,6 @@ elif [[ -n "$PORT_FILE" ]]; then
         EXPECTED_PORT_MAP["$line"]=1
     done < "$PORT_FILE"
     log "  Expected ports (from ${PORT_FILE}): ${!EXPECTED_PORT_MAP[*]}"
-
 else
     for port_intf in "${!UP_PORT_MAP[@]}"; do
         EXPECTED_PORT_MAP["$port_intf"]=1
@@ -348,7 +348,6 @@ fi
 EXPECTED_TOTAL=${#EXPECTED_PORT_MAP[@]}
 log "  Total expected ports: ${EXPECTED_TOTAL}"
 log ""
-
 
 # ======================================================================
 # STEP 3: VALIDATE EXPECTED PORTS ARE UP
@@ -375,7 +374,7 @@ if [[ "$DRY_RUN" == false ]]; then
             actual_state="NOT UP"
 
             if [[ -n "$INTF_BRIEF_OUTPUT" ]]; then
-                state_line=$(echo "$INTF_BRIEF_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1)
+                state_line=$(echo "$INTF_BRIEF_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1 || true)
                 if [[ -n "$state_line" ]]; then
                     if [[ "$state_line" =~ sfpAbsent ]]; then
                         actual_state="NO SFP"
@@ -415,7 +414,6 @@ else
 fi
 log ""
 
-
 # ======================================================================
 # STEP 4: SFP DIAGNOSTICS
 # ======================================================================
@@ -438,15 +436,12 @@ if [[ "$DRY_RUN" == false ]]; then
         log_raw "  +------------+-------------+-------------+--------+------------------+"
 
         for port_intf in "${SFP_PORTS[@]}"; do
-            sfp_output=$(run_cmd "show interface ${port_intf} transceiver details" \
-                "SFP diagnostics for ${port_intf}" 2>/dev/null) || {
+            sfp_output=$(run_cmd "show interface ${port_intf} transceiver details" "SFP diagnostics for ${port_intf}" 2>/dev/null) || {
                 log "  !!! Failed to get transceiver details for ${port_intf}"
                 SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
                 continue
             }
 
-            # Parse RX Power (dBm)
-            # NX-OS output example: "Rx Power    -3.42 dBm    372.46 uW"
             rx_dbm=""
             if echo "$sfp_output" | grep -qi "Rx Power"; then
                 rx_line=$(echo "$sfp_output" | grep -i "Rx Power" | head -1)
@@ -455,8 +450,6 @@ if [[ "$DRY_RUN" == false ]]; then
                 fi
             fi
 
-            # Parse TX Power (dBm)
-            # NX-OS output example: "Tx Power    -2.81 dBm    523.88 uW"
             tx_dbm=""
             if echo "$sfp_output" | grep -qi "Tx Power"; then
                 tx_line=$(echo "$sfp_output" | grep -i "Tx Power" | head -1)
@@ -502,7 +495,6 @@ if [[ "$DRY_RUN" == false ]]; then
             [[ -z "$detail" ]] && detail="Clean"
             status_display=$(printf "%-6s" "$status")
             detail_display=$(printf "%-16s" "$detail")
-
             log_raw "  | ${port_display} | ${rx_display} | ${tx_display} | ${status_display} | ${detail_display} |"
 
             echo "--- transceiver ${port_intf} ---" >> "$LOG_FILE"
@@ -520,10 +512,9 @@ if [[ "$DRY_RUN" == false ]]; then
         [[ $SFP_OK -gt 0 ]]   && log "  OK: ${SFP_OK} port(s) with clean SFP power levels"
     fi
 else
-    log "  (dry-run: would run 'show interface <port> transceiver details' on each up port)"
+    log "  (dry-run: would run 'show interface  transceiver details' on each up port)"
 fi
 log ""
-
 
 # ======================================================================
 # STEP 5: PORT ERROR COUNTERS
@@ -538,10 +529,9 @@ if [[ "$DRY_RUN" == false ]]; then
         PORTS_WITH_ERRORS=0
         for port_intf in "${SORTED_EXPECTED[@]}"; do
             if [[ -n "${UP_PORT_MAP[$port_intf]+_}" ]]; then
-                err_line=$(echo "$PORTERR_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1)
+                err_line=$(echo "$PORTERR_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1 || true)
                 if [[ -n "$err_line" ]]; then
                     has_errors=false
-                    # Skip the interface name column, check remaining values
                     err_values=$(echo "$err_line" | awk '{for(i=2;i<=NF;i++) print $i}')
                     for val in $err_values; do
                         if [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]]; then
@@ -569,28 +559,22 @@ else
 fi
 log ""
 
-
 # ======================================================================
 # STEP 6: WWN LOGIN VERIFICATION via flogi database (optional)
 # ======================================================================
 if [[ -n "$ALIAS_FILE" ]]; then
     log "============ STEP 6: WWN LOGIN VERIFICATION via flogi/fcns (from ${ALIAS_FILE}) ============"
 
-    # Collect flogi database
     FLOGI_OUTPUT=""
     FCNS_OUTPUT=""
     if [[ "$DRY_RUN" == false ]]; then
-        FLOGI_OUTPUT=$(run_cmd "show flogi database vsan ${VSAN}" \
-            "Collect FLOGI database for VSAN ${VSAN}")
+        FLOGI_OUTPUT=$(run_cmd "show flogi database vsan ${VSAN}" "Collect FLOGI database for VSAN ${VSAN}")
         echo "$FLOGI_OUTPUT" >> "$LOG_FILE"
 
-        # Also collect FCNS for remote devices
-        FCNS_OUTPUT=$(run_cmd "show fcns database vsan ${VSAN}" \
-            "Collect FCNS database for VSAN ${VSAN}")
+        FCNS_OUTPUT=$(run_cmd "show fcns database vsan ${VSAN}" "Collect FCNS database for VSAN ${VSAN}")
         echo "$FCNS_OUTPUT" >> "$LOG_FILE"
     fi
 
-    # Parse aliases.txt
     declare -A ALIAS_WWNS
     CURRENT_ALIAS=""
 
@@ -628,24 +612,19 @@ if [[ -n "$ALIAS_FILE" ]]; then
             found_intf="---"
             found_source="---"
 
-            # Check FLOGI database first (local logins)
-            # Typical flogi output line:
-            # fc1/1     1    0x0a0000  10:00:00:10:9b:33:b3:a7  20:00:00:10:9b:33:b3:a7
             if [[ -n "$FLOGI_OUTPUT" ]]; then
-                flogi_line=$(echo "$FLOGI_OUTPUT" | grep -i "$wwn" | head -1)
+                flogi_line=$(echo "$FLOGI_OUTPUT" | grep -i "$wwn" | head -1 || true)
                 if [[ -n "$flogi_line" ]]; then
                     found=true
                     found_source="FLOGI (local)"
-                    # Extract interface from first column
                     if [[ "$flogi_line" =~ (fc[0-9]+/[0-9]+) ]]; then
                         found_intf="${BASH_REMATCH[1]}"
                     fi
                 fi
             fi
 
-            # If not in FLOGI, check FCNS (remote devices in fabric)
             if [[ "$found" == false && -n "$FCNS_OUTPUT" ]]; then
-                fcns_line=$(echo "$FCNS_OUTPUT" | grep -i "$wwn" | head -1)
+                fcns_line=$(echo "$FCNS_OUTPUT" | grep -i "$wwn" | head -1 || true)
                 if [[ -n "$fcns_line" ]]; then
                     found=true
                     found_source="FCNS (remote)"
@@ -684,7 +663,6 @@ if [[ -n "$ALIAS_FILE" ]]; then
     fi
     log ""
 fi
-
 
 # ======================================================================
 # SUMMARY
