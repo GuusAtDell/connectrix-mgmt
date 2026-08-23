@@ -11,28 +11,17 @@
 # config.txt — Zoneset definition (zoneset name + zone members)
 #
 # FILE FORMATS:
-# aliases.txt:
-# alias:
-#
-# zones.txt:
-# zone:
-# ; ; ;
-# ;
-#
-# config.txt:
-# cfg:
-# ;
-# ;
+# - Please refer to the docs/FILE_FORMATS.md documentation
 #
 # AUTHENTICATION:
 # - SSH key only. Password authentication is intentionally disabled.
 # - Supports an optional identity file via --ssh-key.
 #
 # USAGE:
-# chmod +x zone_cisco.sh
-# ./zone_cisco.sh --dry-run
-# ./zone_cisco.sh
-# ./zone_cisco.sh \
+# chmod +x zoning.sh
+# ./zoning.sh --dry-run
+# ./zoning.sh
+# ./zoning.sh \
 # --switch-name myswitch \
 # --switch-ip 192.168.0.1 \
 # --switch-user admin \
@@ -45,7 +34,7 @@
 # --dry-run
 #
 # LAB OVERRIDE:
-# ./zone_cisco.sh --switch-ip 192.168.0.1 --insecure-hostkey --dry-run
+# ./zoning.sh --switch-ip 192.168.0.1 --insecure-hostkey --dry-run
 #
 # VALIDATION:
 # - Before creating zones, verifies ALL member device-aliases were defined
@@ -75,7 +64,7 @@ ALIAS_FILE="aliases.txt"
 ZONE_FILE="zones.txt"
 CFG_FILE="config.txt"
 DRY_RUN=false
-LOG_FILE="zoning_cisco_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="zoning_$(date +%Y%m%d_%H%M%S).log"
 
 # ========================= PARSE ARGUMENTS ============================
 while [[ $# -gt 0 ]]; do

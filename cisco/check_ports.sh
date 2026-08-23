@@ -15,34 +15,34 @@
 # - Supports an optional identity file via --ssh-key.
 #
 # USAGE:
-# chmod +x check_ports_cisco.sh
+# chmod +x check_ports.sh
 #
 # # Auto-detect up ports from show interface brief
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7
+# ./check_ports.sh --switch-ip 10.154.81.7
 #
 # # Specify SSH key explicitly
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 --ssh-key ~/.ssh/id_ed25519
+# ./check_ports.sh --switch-ip 10.154.81.7 --ssh-key ~/.ssh/id_ed25519
 #
 # # Use a dedicated known_hosts file
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 --known-hosts-file ./known_hosts
+# ./check_ports.sh --switch-ip 10.154.81.7 --known-hosts-file ./known_hosts
 #
 # # Lab-only override: disable host key verification
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 --insecure-hostkey
+# ./check_ports.sh --switch-ip 10.154.81.7 --insecure-hostkey
 #
 # # Specify expected ports (comma-separated, Cisco format)
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 \
+# ./check_ports.sh --switch-ip 10.154.81.7 \
 # --ports fc1/1,fc1/2,fc1/3,fc1/4
 #
 # # Specify expected ports from a file (one interface per line)
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 \
+# ./check_ports.sh --switch-ip 10.154.81.7 \
 # --port-file expected_ports.txt
 #
 # # Also verify WWN logins against alias file
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 \
+# ./check_ports.sh --switch-ip 10.154.81.7 \
 # --alias-file aliases.txt --vsan 100
 #
 # # Dry run
-# ./check_ports_cisco.sh --switch-ip 10.154.81.7 --dry-run
+# ./check_ports.sh --switch-ip 10.154.81.7 --dry-run
 #
 # PORT FILE FORMAT (expected_ports.txt):
 # One Cisco interface name per line. Comments (#) and blank lines ignored.
@@ -68,7 +68,7 @@ KNOWN_HOSTS_FILE=""
 INSECURE_HOSTKEY=false
 VSAN="1"
 DRY_RUN=false
-LOG_FILE="portcheck_cisco_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="portcheck_$(date +%Y%m%d_%H%M%S).log"
 
 EXPECTED_PORTS=""
 PORT_FILE=""

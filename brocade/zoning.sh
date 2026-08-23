@@ -11,20 +11,7 @@
 # config.txt — Config definition (config name + zone members)
 #
 # FILE FORMATS:
-# aliases.txt:
-# alias:
-#
-# zones.txt:
-# zone:
-# ; ; ;
-# ;
-# (members can span multiple lines; semicolons separate them)
-#
-# config.txt:
-# cfg:
-# ;
-# ;
-# (zone members can span multiple lines; semicolons separate them)
+# - Please refer to the docs/FILE_FORMATS.md documentation
 #
 # PREREQUISITES:
 # - For Windows: use WSL, Git Bash, or Cygwin
