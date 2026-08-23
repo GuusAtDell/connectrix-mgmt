@@ -70,17 +70,37 @@ LOG_FILE="zoning_$(date +%Y%m%d_%H%M%S).log"
 while [[ $# -gt 0 ]]; do
 case "$1" in
 --dry-run) DRY_RUN=true; shift ;;
---switch-name) SWITCH_NAME="$2"; shift 2 ;;
---switch-ip) SWITCH_IP="$2"; shift 2 ;;
---switch-user) SWITCH_USER="$2"; shift 2 ;;
---ssh-key) SSH_KEY="$2"; shift 2 ;;
---known-hosts-file) KNOWN_HOSTS_FILE="$2"; shift 2 ;;
+--switch-name)
+[[ $# -ge 2 ]] || { echo "Missing value for --switch-name"; exit 1; }
+SWITCH_NAME="$2"; shift 2 ;;
+--switch-ip)
+[[ $# -ge 2 ]] || { echo "Missing value for --switch-ip"; exit 1; }
+SWITCH_IP="$2"; shift 2 ;;
+--switch-user)
+[[ $# -ge 2 ]] || { echo "Missing value for --switch-user"; exit 1; }
+SWITCH_USER="$2"; shift 2 ;;
+--ssh-key)
+[[ $# -ge 2 ]] || { echo "Missing value for --ssh-key"; exit 1; }
+SSH_KEY="$2"; shift 2 ;;
+--known-hosts-file)
+[[ $# -ge 2 ]] || { echo "Missing value for --known-hosts-file"; exit 1; }
+KNOWN_HOSTS_FILE="$2"; shift 2 ;;
 --insecure-hostkey) INSECURE_HOSTKEY=true; shift ;;
---vsan) VSAN="$2"; shift 2 ;;
---alias-file) ALIAS_FILE="$2"; shift 2 ;;
---zone-file) ZONE_FILE="$2"; shift 2 ;;
---cfg-file) CFG_FILE="$2"; shift 2 ;;
---log-file) LOG_FILE="$2"; shift 2 ;;
+--vsan)
+[[ $# -ge 2 ]] || { echo "Missing value for --vsan"; exit 1; }
+VSAN="$2"; shift 2 ;;
+--alias-file)
+[[ $# -ge 2 ]] || { echo "Missing value for --alias-file"; exit 1; }
+ALIAS_FILE="$2"; shift 2 ;;
+--zone-file)
+[[ $# -ge 2 ]] || { echo "Missing value for --zone-file"; exit 1; }
+ZONE_FILE="$2"; shift 2 ;;
+--cfg-file)
+[[ $# -ge 2 ]] || { echo "Missing value for --cfg-file"; exit 1; }
+CFG_FILE="$2"; shift 2 ;;
+--log-file)
+[[ $# -ge 2 ]] || { echo "Missing value for --log-file"; exit 1; }
+LOG_FILE="$2"; shift 2 ;;
 -h|--help)
 echo "Usage: $0 [OPTIONS]"
 echo ""
@@ -150,6 +170,7 @@ log ">>> $cmd"
 
 if [[ "$DRY_RUN" == false ]]; then
 local output
+local -a ssh_cmd
 mapfile -t ssh_cmd < <(build_ssh_cmd)
 output=$("${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
 log "!!! COMMAND FAILED: $cmd"
@@ -182,14 +203,11 @@ done <<< "$cmds"
 
 if [[ "$DRY_RUN" == false ]]; then
 local output
+local payload
+local -a ssh_cmd
 mapfile -t ssh_cmd < <(build_ssh_cmd)
-output=$("${ssh_cmd[@]}" <<CISCO_CONFIG_EOF
-terminal length 0
-configure terminal
-${cmds}
-end
-CISCO_CONFIG_EOF
-) || {
+payload=$'configure terminal\n'"${cmds}"$'\nend\n'
+output=$(printf '%s' "$payload" | "${ssh_cmd[@]}" 2>&1) || {
 log "!!! CONFIG BLOCK FAILED"
 log "!!! Output: $output"
 log "!!! Aborting script."
@@ -198,7 +216,7 @@ exit 1
 if [[ -n "$output" ]]; then
 log "$output"
 fi
-sleep 2
+sleep 1
 fi
 log ""
 }
@@ -214,6 +232,7 @@ log ">>> $cmd (with auto-confirm)"
 
 if [[ "$DRY_RUN" == false ]]; then
 local output
+local -a ssh_cmd
 mapfile -t ssh_cmd < <(build_ssh_cmd)
 output=$(printf 'y\n' | "${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
 log "!!! COMMAND FAILED: $cmd"
@@ -235,6 +254,21 @@ local var="$1"
 var="${var#"${var%%[![:space:]]*}"}"
 var="${var%"${var##*[![:space:]]}"}"
 echo "$var"
+}
+
+is_valid_name() {
+local name="$1"
+[[ "$name" =~ ^[A-Za-z0-9_.:-]+$ ]]
+}
+
+normalize_wwn() {
+local wwn="$1"
+echo "${wwn,,}"
+}
+
+normalize_member_list() {
+local raw="$1"
+echo "$raw" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^[;[:space:]]*//;s/[;[:space:]]*$//'
 }
 
 # ========================= PRE-FLIGHT =================================
@@ -261,6 +295,9 @@ log " Config File: ${CFG_FILE}"
 log " Log File : ${LOG_FILE}"
 log "======================================================================"
 log ""
+
+[[ "$VSAN" =~ ^[0-9]+$ ]] || { log "ERROR: VSAN must be numeric: ${VSAN}"; exit 1; }
+(( VSAN >= 1 && VSAN <= 4093 )) || { log "ERROR: VSAN out of range (1-4093): ${VSAN}"; exit 1; }
 
 MISSING=false
 for f in "$ALIAS_FILE" "$ZONE_FILE" "$CFG_FILE"; do
@@ -306,6 +343,7 @@ log "========== Script started =========="
 log "============ STEP 1: CREATE DEVICE-ALIASES (from ${ALIAS_FILE}) ============"
 
 declare -A CREATED_ALIASES
+declare -A CREATED_ALIAS_WWNS
 ALIAS_NAME=""
 ALIAS_COUNT=0
 
@@ -316,7 +354,26 @@ line=$(trim "$line")
 [[ -z "$line" || "$line" =~ ^# ]] && continue
 
 if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
+if [[ -n "$ALIAS_NAME" ]]; then
+log "!!! ERROR: Alias '${ALIAS_NAME}' has no corresponding WWN before next alias declaration"
+exit 1
+fi
 ALIAS_NAME=$(trim "${BASH_REMATCH[1]}")
+
+if [[ -z "$ALIAS_NAME" ]]; then
+log "!!! ERROR: Empty alias name in ${ALIAS_FILE}"
+exit 1
+fi
+
+if ! is_valid_name "$ALIAS_NAME"; then
+log "!!! ERROR: Alias '${ALIAS_NAME}' contains invalid characters"
+exit 1
+fi
+
+if [[ -n "${CREATED_ALIASES[$ALIAS_NAME]+_}" ]]; then
+log "!!! ERROR: Duplicate alias '${ALIAS_NAME}' found in ${ALIAS_FILE}"
+exit 1
+fi
 
 elif [[ "$line" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}$ ]]; then
 if [[ -z "$ALIAS_NAME" ]]; then
@@ -324,13 +381,21 @@ log "!!! ERROR: WWN '${line}' found without preceding 'alias:' line"
 exit 1
 fi
 
+line=$(normalize_wwn "$line")
+if [[ -n "${CREATED_ALIAS_WWNS[$line]+_}" ]]; then
+log "!!! ERROR: WWN '${line}' is assigned more than once in ${ALIAS_FILE}"
+exit 1
+fi
+
 DEVALIAS_CONFIG+=$'\n'" device-alias name ${ALIAS_NAME} pwwn ${line}"
 CREATED_ALIASES["${ALIAS_NAME}"]=1
+CREATED_ALIAS_WWNS["${line}"]=1
 ALIAS_COUNT=$((ALIAS_COUNT + 1))
 ALIAS_NAME=""
 
 else
-log "!!! WARNING: Unrecognized line in ${ALIAS_FILE}: ${line}"
+log "!!! ERROR: Unrecognized line in ${ALIAS_FILE}: ${line}"
+exit 1
 fi
 done < "$ALIAS_FILE"
 
@@ -366,19 +431,56 @@ local z_name="$1"
 local z_members_raw="$2"
 
 local normalized
-normalized=$(echo "$z_members_raw" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
+normalized=$(normalize_member_list "$z_members_raw")
+
+if [[ -z "$z_name" ]]; then
+log "!!! ERROR: Encountered empty zone name"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+return
+fi
+
+if ! is_valid_name "$z_name"; then
+log "!!! VALIDATION ERROR: Zone '${z_name}' contains invalid characters"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+return
+fi
+
+if [[ -n "${CREATED_ZONES[$z_name]+_}" ]]; then
+log "!!! VALIDATION ERROR: Duplicate zone '${z_name}' found in ${ZONE_FILE}"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+return
+fi
 
 local IFS=';'
 local members_array=()
+local -A seen_members=()
+local member
+local zone_has_errors=0
 for member in $normalized; do
 member=$(trim "$member")
 [[ -z "$member" ]] && continue
 
+if ! is_valid_name "$member"; then
+log "!!! VALIDATION ERROR: Zone '${z_name}' contains invalid member '${member}'"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+zone_has_errors=1
+continue
+fi
+
 if [[ -z "${CREATED_ALIASES[$member]+_}" ]]; then
 log "!!! VALIDATION ERROR: Zone '${z_name}' references device-alias '${member}' which was NOT defined in ${ALIAS_FILE}"
 VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+zone_has_errors=1
 fi
 
+if [[ -n "${seen_members[$member]+_}" ]]; then
+log "!!! VALIDATION ERROR: Zone '${z_name}' contains duplicate member '${member}'"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+zone_has_errors=1
+continue
+fi
+
+seen_members["$member"]=1
 members_array+=("$member")
 done
 
@@ -388,7 +490,7 @@ VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
 return
 fi
 
-if [[ $VALIDATION_ERRORS -eq 0 ]]; then
+if [[ $zone_has_errors -eq 0 ]]; then
 ZONE_CONFIG+="zone name ${z_name} vsan ${VSAN}"$'\n'
 for m in "${members_array[@]}"; do
 ZONE_CONFIG+=" member device-alias ${m}"$'\n'
@@ -463,16 +565,35 @@ log "!!! ERROR: No 'cfg:' line found in ${CFG_FILE}"
 exit 1
 fi
 
-CFG_MEMBERS_NORMALIZED=$(echo "$CFG_MEMBERS_RAW" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
+if ! is_valid_name "$CFG_NAME"; then
+log "!!! ERROR: Zoneset name '${CFG_NAME}' contains invalid characters"
+exit 1
+fi
+
+CFG_MEMBERS_NORMALIZED=$(normalize_member_list "$CFG_MEMBERS_RAW")
 
 VALIDATION_ERRORS=0
 IFS=';' read -ra CFG_ZONE_ARRAY <<< "$CFG_MEMBERS_NORMALIZED"
 
 ZONESET_CONFIG="zoneset name ${CFG_NAME} vsan ${VSAN}"$'\n'
+declare -A SEEN_CFG_ZONES
 
 for zone_ref in "${CFG_ZONE_ARRAY[@]}"; do
 zone_ref=$(trim "$zone_ref")
 [[ -z "$zone_ref" ]] && continue
+
+if ! is_valid_name "$zone_ref"; then
+log "!!! VALIDATION ERROR: Zoneset '${CFG_NAME}' contains invalid zone reference '${zone_ref}'"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+continue
+fi
+
+if [[ -n "${SEEN_CFG_ZONES[$zone_ref]+_}" ]]; then
+log "!!! VALIDATION ERROR: Zoneset '${CFG_NAME}' contains duplicate zone '${zone_ref}'"
+VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+continue
+fi
+SEEN_CFG_ZONES["$zone_ref"]=1
 CFG_COUNT=$((CFG_COUNT + 1))
 
 if [[ -z "${CREATED_ZONES[$zone_ref]+_}" ]]; then
@@ -484,6 +605,11 @@ ZONESET_CONFIG+=" member ${zone_ref}"$'\n'
 done
 
 ZONESET_CONFIG+="exit"
+
+if [[ $CFG_COUNT -eq 0 ]]; then
+log "!!! ERROR: Zoneset '${CFG_NAME}' has no members"
+exit 1
+fi
 
 if [[ $VALIDATION_ERRORS -gt 0 ]]; then
 log ""

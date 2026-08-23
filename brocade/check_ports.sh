@@ -201,15 +201,315 @@ echo "$var"
 }
 
 # ========================= FLOAT COMPARISON ===========================
-# Bash doesn't do float math natively; use awk
 float_lt() {
-# Returns 0 (true) if $1 < $2
 awk "BEGIN { exit !($1 < $2) }"
 }
 
 float_gte() {
-# Returns 0 (true) if $1 >= $2
 awk "BEGIN { exit !($1 >= $2) }"
+}
+
+# ========================= INPUT VALIDATION HELPERS ===================
+validate_port_token() {
+local port_value="$1"
+[[ "$port_value" =~ ^[0-9]+$ ]]
+}
+
+add_expected_port() {
+local port_value="$1"
+if ! validate_port_token "$port_value"; then
+log "ERROR: Invalid port value '${port_value}' — expected numeric port index"
+exit 1
+fi
+EXPECTED_PORT_MAP["$port_value"]=1
+}
+
+# ========================= SWITCHSHOW PARSERS =========================
+parse_switchshow_line() {
+local line="$1"
+local trimmed_line=""
+local -a fields=()
+local port_index=""
+local port_num=""
+local state=""
+local wwn=""
+local token=""
+
+trimmed_line=$(trim "$line")
+
+[[ -z "$trimmed_line" ]] && return 1
+[[ "$trimmed_line" =~ ^[-=]+$ ]] && return 1
+[[ "$trimmed_line" =~ ^(Index|Area|Slot|Port|switchName|switchType|LS[[:space:]]+Attributes|Index[[:space:]]+Slot) ]] && return 1
+
+read -r -a fields <<< "$trimmed_line"
+[[ ${#fields[@]} -lt 6 ]] && return 1
+
+[[ ! "${fields[0]}" =~ ^[0-9]+$ ]] && return 1
+[[ ! "${fields[1]}" =~ ^[0-9]+$ ]] && return 1
+
+port_index="${fields[0]}"
+port_num="${fields[1]}"
+
+for token in "${fields[@]}"; do
+case "$token" in
+Online|Offline|No_Light|No_Module|Disabled|Faulty|In_Sync)
+state="$token"
+break
+;;
+esac
+done
+
+if [[ "$trimmed_line" =~ ([0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}) ]]; then
+wwn="${BASH_REMATCH[1],,}"
+fi
+
+[[ -z "$state" ]] && return 1
+printf '%s|%s|%s|%s\n' "$port_index" "$port_num" "$state" "$wwn"
+return 0
+}
+
+parse_switchshow_output() {
+local input="$1"
+local parsed=""
+while IFS= read -r line; do
+parsed=$(parse_switchshow_line "$line") || continue
+printf '%s\n' "$parsed"
+done <<< "$input"
+}
+
+get_switchshow_state_for_port() {
+local target_port="$1"
+local input="$2"
+local parsed=""
+local local_index=""
+local local_port=""
+local local_state=""
+local local_wwn=""
+
+while IFS= read -r line; do
+parsed=$(parse_switchshow_line "$line") || continue
+IFS='|' read -r local_index local_port local_state local_wwn <<< "$parsed"
+if [[ "$local_index" == "$target_port" ]]; then
+printf '%s\n' "$local_state"
+return 0
+fi
+done <<< "$input"
+
+return 1
+}
+
+# ========================= PORTERRSHOW PARSERS ========================
+parse_porterrshow_line() {
+local line="$1"
+local trimmed_line=""
+local port_index=""
+local remainder=""
+local -a values=()
+local value=""
+
+trimmed_line=$(trim "$line")
+
+[[ -z "$trimmed_line" ]] && return 1
+[[ "$trimmed_line" =~ ^[-=]+$ ]] && return 1
+[[ "$trimmed_line" =~ ^(frames|enc_in|crc_err|too_shrt|too_long|bad_eof|enc_out|disc_c3|link_fail|loss_sync|loss_sig|port) ]] && return 1
+
+if [[ "$trimmed_line" =~ ^([0-9]+):?[[:space:]]+(.*)$ ]]; then
+port_index="${BASH_REMATCH[1]}"
+remainder="${BASH_REMATCH[2]}"
+else
+return 1
+fi
+
+read -r -a values <<< "$remainder"
+[[ ${#values[@]} -eq 0 ]] && return 1
+
+for value in "${values[@]}"; do
+[[ ! "$value" =~ ^[0-9]+$ ]] && return 1
+done
+
+printf '%s|%s\n' "$port_index" "$remainder"
+return 0
+}
+
+get_porterrshow_values_for_port() {
+local target_port="$1"
+local input="$2"
+local parsed=""
+local local_index=""
+local local_values=""
+
+while IFS= read -r line; do
+parsed=$(parse_porterrshow_line "$line") || continue
+IFS='|' read -r local_index local_values <<< "$parsed"
+if [[ "$local_index" == "$target_port" ]]; then
+printf '%s\n' "$local_values"
+return 0
+fi
+done <<< "$input"
+
+return 1
+}
+
+porterrshow_has_nonzero_errors() {
+local values="$1"
+local val=""
+for val in $values; do
+if [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]]; then
+return 0
+fi
+done
+return 1
+}
+
+# ========================= SFP PARSERS ================================
+extract_power_dbm() {
+local label="$1"
+local input="$2"
+local normalized=""
+local matched_line=""
+
+normalized=$(printf '%s\n' "$input" | tr -d '\r')
+matched_line=$(echo "$normalized" | grep -iE "${label}[[:space:]]*Power[[:space:]]*:|${label}[[:space:]]*Power" | head -1 || true)
+
+if [[ -n "$matched_line" && "$matched_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
+printf '%s\n' "${BASH_REMATCH[1]}"
+return 0
+fi
+
+return 1
+}
+
+parse_sfpshow_output() {
+local input="$1"
+local rx_dbm=""
+local tx_dbm=""
+local parse_status=""
+
+rx_dbm=$(extract_power_dbm "RX" "$input" || true)
+tx_dbm=$(extract_power_dbm "TX" "$input" || true)
+
+if [[ -n "$rx_dbm" && -n "$tx_dbm" ]]; then
+parse_status="BOTH"
+elif [[ -n "$rx_dbm" ]]; then
+parse_status="RX_ONLY"
+elif [[ -n "$tx_dbm" ]]; then
+parse_status="TX_ONLY"
+else
+parse_status="NONE"
+fi
+
+printf '%s|%s|%s\n' "$parse_status" "$rx_dbm" "$tx_dbm"
+}
+
+# ========================= NODEFIND PARSERS ===========================
+parse_nodefind_output() {
+local input="$1"
+local normalized=""
+local port_found=""
+local device_info=""
+local speed_info=""
+local detail=""
+
+normalized=$(printf '%s\n' "$input" | tr -d '\r')
+
+if echo "$normalized" | grep -Eqi 'no[[:space:]]+device[[:space:]]+found|not[[:space:]]+found'; then
+printf 'NOT_FOUND|||Not logged in to fabric\n'
+return 0
+fi
+
+if [[ "$normalized" =~ Port[[:space:]_]+Index:[[:space:]]*([0-9]+) ]]; then
+port_found="${BASH_REMATCH[1]}"
+elif [[ "$normalized" =~ Port:[[:space:]]*([0-9]+) ]]; then
+port_found="${BASH_REMATCH[1]}"
+fi
+
+if [[ "$normalized" =~ HN:([^[:space:]\."]+) ]]; then
+device_info="HN:${BASH_REMATCH[1]}"
+else
+local nodesymb_line=""
+nodesymb_line=$(echo "$normalized" | grep -i 'NodeSymb' | head -1 || true)
+if [[ -n "$nodesymb_line" && "$nodesymb_line" =~ \"([^\"]+)\" ]]; then
+device_info="${BASH_REMATCH[1]:0:28}"
+fi
+fi
+
+if [[ "$normalized" =~ Device[[:space:]]+link[[:space:]]+speed:[[:space:]]*([0-9]+G) ]]; then
+speed_info="${BASH_REMATCH[1]}"
+elif [[ "$normalized" =~ ([0-9]+G)[[:space:]]*(SWL|LWL|NWL)? ]]; then
+speed_info="${BASH_REMATCH[1]}"
+fi
+
+if [[ -n "$port_found" || "$normalized" =~ Port[[:space:]_]+Index: ]]; then
+detail="$device_info"
+if [[ -n "$speed_info" ]]; then
+detail="${detail:+${detail} }${speed_info}"
+fi
+[[ -z "$detail" ]] && detail="Found"
+printf 'FOUND|%s|%s|%s\n' "$port_found" "$speed_info" "$detail"
+return 0
+fi
+
+if [[ -n "$(trim "$normalized")" ]]; then
+detail="$device_info"
+if [[ -n "$speed_info" ]]; then
+detail="${detail:+${detail} }${speed_info}"
+fi
+[[ -z "$detail" ]] && detail="Unrecognized nodefind output"
+printf 'AMBIGUOUS|%s|%s|%s\n' "$port_found" "$speed_info" "$detail"
+return 0
+fi
+
+printf 'NOT_FOUND|||Unrecognized nodefind output\n'
+return 0
+}
+
+# ========================= ALIAS FILE PARSERS =========================
+load_alias_file() {
+local alias_file="$1"
+local line=""
+local current_alias=""
+local normalized_wwn=""
+
+declare -gA ALIAS_WWNS=()
+declare -gA WWN_ALIAS_MAP=()
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+line=$(trim "$line")
+[[ -z "$line" || "$line" =~ ^# ]] && continue
+
+if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
+current_alias=$(trim "${BASH_REMATCH[1]}")
+[[ -z "$current_alias" ]] && {
+log "ERROR: Empty alias name found in ${alias_file}"
+exit 1
+}
+if [[ -n "${ALIAS_WWNS[$current_alias]+_}" ]]; then
+log "ERROR: Duplicate alias name '${current_alias}' found in ${alias_file}"
+exit 1
+fi
+elif [[ "$line" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}$ ]]; then
+if [[ -z "$current_alias" ]]; then
+log "ERROR: WWN '${line}' found without preceding alias in ${alias_file}"
+exit 1
+fi
+normalized_wwn="${line,,}"
+if [[ -n "${WWN_ALIAS_MAP[$normalized_wwn]+_}" ]]; then
+log "ERROR: Duplicate WWN '${normalized_wwn}' found in ${alias_file}"
+exit 1
+fi
+ALIAS_WWNS["$current_alias"]="$normalized_wwn"
+WWN_ALIAS_MAP["$normalized_wwn"]="$current_alias"
+current_alias=""
+else
+log "ERROR: Unrecognized alias-file line '${line}' in ${alias_file}"
+exit 1
+fi
+done < "$alias_file"
+
+if [[ -n "$current_alias" ]]; then
+log "ERROR: Alias '${current_alias}' has no WWN in ${alias_file}"
+exit 1
+fi
 }
 
 # ========================= PRE-FLIGHT =================================
@@ -260,7 +560,6 @@ echo "ERROR: Known hosts file not found: ${KNOWN_HOSTS_FILE}"
 exit 1
 fi
 
-# Verify optional input files exist
 if [[ -n "$PORT_FILE" && ! -f "$PORT_FILE" ]]; then
 echo "ERROR: Port file not found: ${PORT_FILE}"
 exit 1
@@ -297,57 +596,44 @@ fi
 # ======================================================================
 log "============ STEP 2: DETERMINE PORT LIST ============"
 
-declare -A EXPECTED_PORT_MAP # Ports that SHOULD be online
-declare -A ONLINE_PORT_MAP # Ports that ARE online (from switchshow)
-declare -A PORT_WWN_MAP # Port index -> WWN (from switchshow)
+declare -A EXPECTED_PORT_MAP
+declare -A ONLINE_PORT_MAP
+declare -A PORT_WWN_MAP
 
-# --- Parse switchshow to find currently online ports and their WWNs ---
 if [[ "$DRY_RUN" == false && -n "$SWITCHSHOW_OUTPUT" ]]; then
-while IFS= read -r line; do
-# Match switchshow port lines like:
-# 0 0 010000 id N8 Online FC F-Port 10:00:00:10:9b:33:b3:a7
-if [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+[0-9a-f]+[[:space:]]+(--|id|cu)[[:space:]]+(N?[0-9GKMN]*)[[:space:]]+([A-Za-z_]+) ]]; then
-local_index="${BASH_REMATCH[1]}"
-local_port="${BASH_REMATCH[2]}"
-local_state="${BASH_REMATCH[5]}"
+while IFS='|' read -r local_index local_port local_state local_wwn; do
+[[ -z "$local_index" ]] && continue
 
 if [[ "$local_state" == "Online" ]]; then
 ONLINE_PORT_MAP["${local_index}"]=1
-
-# Extract WWN if present (F-Port line)
-if [[ "$line" =~ ([0-9a-f]{2}(:[0-9a-f]{2}){7})[[:space:]]*$ ]]; then
-PORT_WWN_MAP["${local_index}"]="${BASH_REMATCH[1]}"
+if [[ -n "$local_wwn" ]]; then
+PORT_WWN_MAP["${local_index}"]="$local_wwn"
 fi
 fi
-fi
-done <<< "$SWITCHSHOW_OUTPUT"
+done < <(parse_switchshow_output "$SWITCHSHOW_OUTPUT")
 
 log " Online ports detected: ${!ONLINE_PORT_MAP[*]}"
 log " Total online: ${#ONLINE_PORT_MAP[@]}"
 fi
 
-# --- Build expected port list based on source ---
 if [[ -n "$EXPECTED_PORTS" ]]; then
-# Source: command-line --ports argument
 IFS=',' read -ra PORT_ARRAY <<< "$EXPECTED_PORTS"
 for p in "${PORT_ARRAY[@]}"; do
 p=$(trim "$p")
 [[ -z "$p" ]] && continue
-EXPECTED_PORT_MAP["$p"]=1
+add_expected_port "$p"
 done
 log " Expected ports (from --ports): ${!EXPECTED_PORT_MAP[*]}"
 
 elif [[ -n "$PORT_FILE" ]]; then
-# Source: port file
 while IFS= read -r line || [[ -n "$line" ]]; do
 line=$(trim "$line")
 [[ -z "$line" || "$line" =~ ^# ]] && continue
-EXPECTED_PORT_MAP["$line"]=1
+add_expected_port "$line"
 done < "$PORT_FILE"
 log " Expected ports (from ${PORT_FILE}): ${!EXPECTED_PORT_MAP[*]}"
 
 else
-# Source: auto-detect from switchshow (all online ports)
 for port_idx in "${!ONLINE_PORT_MAP[@]}"; do
 EXPECTED_PORT_MAP["$port_idx"]=1
 done
@@ -356,6 +642,14 @@ fi
 
 EXPECTED_TOTAL=${#EXPECTED_PORT_MAP[@]}
 log " Total expected ports: ${EXPECTED_TOTAL}"
+
+for port_idx in "${!EXPECTED_PORT_MAP[@]}"; do
+if [[ "$DRY_RUN" == false && -z "${ONLINE_PORT_MAP[$port_idx]+_}" ]]; then
+if ! get_switchshow_state_for_port "$port_idx" "$SWITCHSHOW_OUTPUT" >/dev/null 2>&1; then
+log " !!! Requested port ${port_idx} does not appear in switchshow output"
+fi
+fi
+done
 log ""
 
 # ======================================================================
@@ -365,11 +659,10 @@ log "============ STEP 3: VALIDATE EXPECTED PORTS ============"
 
 if [[ "$DRY_RUN" == false ]]; then
 log ""
-log_raw " +-------+----------+-------------------+"
+log_raw " +-------+----------------------+---------------------------+"
 log_raw " | Port | Status | WWN |"
-log_raw " +-------+----------+-------------------+"
+log_raw " +-------+----------------------+---------------------------+"
 
-# Sort port indices numerically
 SORTED_EXPECTED=($(echo "${!EXPECTED_PORT_MAP[@]}" | tr ' ' '\n' | sort -n))
 
 for port_idx in "${SORTED_EXPECTED[@]}"; do
@@ -380,39 +673,46 @@ wwn="${PORT_WWN_MAP[$port_idx]:-N/A}"
 log_raw " | ${port_display} | ONLINE | ${wwn} |"
 PORTS_ONLINE=$((PORTS_ONLINE + 1))
 else
-# Port is expected but NOT online — determine actual state
 actual_state="NOT ONLINE"
+parsed_state=$(get_switchshow_state_for_port "$port_idx" "$SWITCHSHOW_OUTPUT" || true)
 
-# Try to find the actual state from switchshow
-if [[ -n "$SWITCHSHOW_OUTPUT" ]]; then
-state_line=$(echo "$SWITCHSHOW_OUTPUT" | grep -E "^[[:space:]]*${port_idx}[[:space:]]+" | head -1)
-if [[ -n "$state_line" ]]; then
-if [[ "$state_line" =~ No_Light ]]; then
+case "$parsed_state" in
+No_Light)
 actual_state="NO LIGHT"
 PORTS_NO_LIGHT=$((PORTS_NO_LIGHT + 1))
-elif [[ "$state_line" =~ No_Module ]]; then
+;;
+No_Module)
 actual_state="NO SFP"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-elif [[ "$state_line" =~ Disabled ]]; then
+;;
+Disabled)
 actual_state="DISABLED"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-elif [[ "$state_line" =~ Offline ]]; then
+;;
+Offline)
 actual_state="OFFLINE"
 PORTS_OFFLINE=$((PORTS_OFFLINE + 1))
-elif [[ "$state_line" =~ In_Sync ]]; then
+;;
+In_Sync)
 actual_state="IN SYNC"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-elif [[ "$state_line" =~ Faulty ]]; then
+;;
+Faulty)
 actual_state="FAULTY"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-else
-PORTS_OTHER=$((PORTS_OTHER + 1))
-fi
-else
+;;
+Online)
+actual_state="ONLINE"
+;;
+"")
 actual_state="NOT FOUND"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-fi
-fi
+;;
+*)
+actual_state="$parsed_state"
+PORTS_OTHER=$((PORTS_OTHER + 1))
+;;
+esac
 
 log_raw " | ${port_display} | *** ${actual_state} *** | --- EXPECTED ONLINE |"
 EXPECTED_MISSING=$((EXPECTED_MISSING + 1))
@@ -421,7 +721,7 @@ fi
 TOTAL_PORTS_CHECKED=$((TOTAL_PORTS_CHECKED + 1))
 done
 
-log_raw " +-------+----------+-------------------+"
+log_raw " +-------+----------------------+---------------------------+"
 log ""
 
 if [[ $EXPECTED_MISSING -gt 0 ]]; then
@@ -440,7 +740,6 @@ log ""
 log "============ STEP 4: SFP DIAGNOSTICS (sfpshow) ============"
 
 if [[ "$DRY_RUN" == false ]]; then
-# Only run sfpshow on ports that are online (have an SFP with light)
 SFPSHOW_PORTS=()
 for port_idx in "${SORTED_EXPECTED[@]}"; do
 if [[ -n "${ONLINE_PORT_MAP[$port_idx]+_}" ]]; then
@@ -452,61 +751,54 @@ if [[ ${#SFPSHOW_PORTS[@]} -eq 0 ]]; then
 log " No online ports to check SFP diagnostics on."
 else
 log ""
-log_raw " +-------+-------------+-------------+--------+------------------+"
+log_raw " +-------+-------------+-------------+--------+--------------------------+"
 log_raw " | Port | RX Pwr(dBm) | TX Pwr(dBm) | Status | Detail |"
-log_raw " +-------+-------------+-------------+--------+------------------+"
+log_raw " +-------+-------------+-------------+--------+--------------------------+"
 
 for port_idx in "${SFPSHOW_PORTS[@]}"; do
-# Run sfpshow for this specific port
 sfp_output=$(run_cmd "sfpshow ${port_idx}" "SFP diagnostics for port ${port_idx}" 2>/dev/null) || {
 log " !!! Failed to get sfpshow for port ${port_idx}"
 SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
 continue
 }
 
-# Parse RX Power (dBm)
-rx_dbm=""
-if echo "$sfp_output" | grep -qi "RX Power"; then
-rx_line=$(echo "$sfp_output" | grep -i "RX Power" | head -1)
-# Match patterns like: "RX Power: -3.5 dBm" or "RX Power: -3.5 dBm 446.7 uW"
-if [[ "$rx_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
-rx_dbm="${BASH_REMATCH[1]}"
-fi
-fi
+IFS='|' read -r sfp_parse_status rx_dbm tx_dbm <<< "$(parse_sfpshow_output "$sfp_output")"
 
-# Parse TX Power (dBm)
-tx_dbm=""
-if echo "$sfp_output" | grep -qi "TX Power"; then
-tx_line=$(echo "$sfp_output" | grep -i "TX Power" | head -1)
-if [[ "$tx_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
-tx_dbm="${BASH_REMATCH[1]}"
-fi
-fi
-
-# Determine status
 port_display=$(printf "%-5s" "$port_idx")
 rx_display=$(printf "%-11s" "${rx_dbm:-N/A}")
 tx_display=$(printf "%-11s" "${tx_dbm:-N/A}")
 status="OK"
 detail=""
 
-if [[ -z "$rx_dbm" || -z "$tx_dbm" ]]; then
+case "$sfp_parse_status" in
+BOTH)
+;;
+RX_ONLY)
 status="UNKNOWN"
-detail="Could not parse power"
+detail="TX power parse failed"
 SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
-else
-# Check RX power
+;;
+TX_ONLY)
+status="UNKNOWN"
+detail="RX power parse failed"
+SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
+;;
+NONE|*)
+status="UNKNOWN"
+detail="Both power parses failed"
+SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
+;;
+esac
+
+if [[ "$status" != "UNKNOWN" ]]; then
 if float_lt "$rx_dbm" "$RX_CRIT_DBM" 2>/dev/null; then
 status="CRIT"
 detail="RX below ${RX_CRIT_DBM}"
 elif float_lt "$rx_dbm" "$RX_WARN_DBM" 2>/dev/null; then
-if [[ "$status" != "CRIT" ]]; then
 status="WARN"
 detail="RX below ${RX_WARN_DBM}"
 fi
-fi
 
-# Check TX power
 if float_lt "$tx_dbm" "$TX_CRIT_DBM" 2>/dev/null; then
 status="CRIT"
 detail="${detail:+${detail}; }TX below ${TX_CRIT_DBM}"
@@ -517,7 +809,6 @@ fi
 detail="${detail:+${detail}; }TX below ${TX_WARN_DBM}"
 fi
 
-# Update counters
 case "$status" in
 OK) SFP_OK=$((SFP_OK + 1)) ;;
 WARN) SFP_WARN=$((SFP_WARN + 1)) ;;
@@ -525,24 +816,19 @@ CRIT) SFP_CRIT=$((SFP_CRIT + 1)) ;;
 esac
 fi
 
-if [[ -z "$detail" ]]; then
-detail="Clean"
-fi
-
+[[ -z "$detail" ]] && detail="Clean"
 status_display=$(printf "%-6s" "$status")
-detail_display=$(printf "%-16s" "$detail")
-
+detail_display=$(printf "%-24s" "$detail")
 log_raw " | ${port_display} | ${rx_display} | ${tx_display} | ${status_display} | ${detail_display} |"
 
-# Also log the full sfpshow output for audit trail
 echo "--- sfpshow ${port_idx} ---" >> "$LOG_FILE"
 echo "$sfp_output" >> "$LOG_FILE"
 echo "--- end sfpshow ${port_idx} ---" >> "$LOG_FILE"
 
-sleep 1 # Delay between sfpshow calls for switch stability
+sleep 1
 done
 
-log_raw " +-------+-------------+-------------+--------+------------------+"
+log_raw " +-------+-------------+-------------+--------+--------------------------+"
 log ""
 
 if [[ $SFP_CRIT -gt 0 ]]; then
@@ -570,31 +856,19 @@ PORTERR_OUTPUT=$(run_cmd "porterrshow" "Collect port error counters")
 if [[ -n "$PORTERR_OUTPUT" ]]; then
 echo "$PORTERR_OUTPUT" >> "$LOG_FILE"
 
-# Check for any non-zero error counts on expected ports
-# porterrshow format has columns: frames tx/rx, enc_in, crc_err, crc_g_eof,
-# too_shrt, too_long, bad_eof, enc_out, disc_c3, link_fail, loss_sync, loss_sig, etc.
 PORTS_WITH_ERRORS=0
 
 for port_idx in "${SORTED_EXPECTED[@]}"; do
 if [[ -n "${ONLINE_PORT_MAP[$port_idx]+_}" ]]; then
-# Find the line for this port in porterrshow
-err_line=$(echo "$PORTERR_OUTPUT" | grep -E "^[[:space:]]*${port_idx}:" | head -1)
-if [[ -n "$err_line" ]]; then
-# Check if any error counter (columns after the port number) is non-zero
-# Remove the port label, then check remaining values
-err_values=$(echo "$err_line" | sed 's/^[[:space:]]*[0-9]*://')
-has_errors=false
-for val in $err_values; do
-if [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]]; then
-has_errors=true
-break
-fi
-done
-if [[ "$has_errors" == true ]]; then
+err_values=$(get_porterrshow_values_for_port "$port_idx" "$PORTERR_OUTPUT" || true)
+if [[ -n "$err_values" ]]; then
+if porterrshow_has_nonzero_errors "$err_values"; then
 log " !!! Port ${port_idx}: Non-zero error counters detected"
-log " ${err_line}"
+log " ${port_idx}: ${err_values}"
 PORTS_WITH_ERRORS=$((PORTS_WITH_ERRORS + 1))
 fi
+else
+log " !!! Port ${port_idx}: Parser could not classify any porterrshow row"
 fi
 fi
 done
@@ -611,32 +885,12 @@ fi
 log ""
 
 # ======================================================================
-# STEP 6: WWN LOGIN VERIFICATION (optional, if --alias-file provided)
-# ======================================================================
-# ======================================================================
 # STEP 6: WWN LOGIN VERIFICATION via nodefind (optional, if --alias-file provided)
 # ======================================================================
 if [[ -n "$ALIAS_FILE" ]]; then
 log "============ STEP 6: WWN LOGIN VERIFICATION via nodefind (from ${ALIAS_FILE}) ============"
 
-# Parse aliases.txt to extract all alias->WWN mappings
-declare -A ALIAS_WWNS # alias_name -> wwn
-CURRENT_ALIAS=""
-
-while IFS= read -r line || [[ -n "$line" ]]; do
-line=$(trim "$line")
-[[ -z "$line" || "$line" =~ ^# ]] && continue
-
-if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
-CURRENT_ALIAS=$(trim "${BASH_REMATCH[1]}")
-elif [[ "$line" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}$ ]]; then
-if [[ -n "$CURRENT_ALIAS" ]]; then
-ALIAS_WWNS["${CURRENT_ALIAS}"]="$line"
-CURRENT_ALIAS=""
-fi
-fi
-done < "$ALIAS_FILE"
-
+load_alias_file "$ALIAS_FILE"
 TOTAL_ALIASES=${#ALIAS_WWNS[@]}
 log " Aliases loaded from ${ALIAS_FILE}: ${TOTAL_ALIASES}"
 
@@ -646,7 +900,6 @@ log_raw " +----------------------------------+-------------------------+--------
 log_raw " | Alias | WWN | Logged In| Port | Detail |"
 log_raw " +----------------------------------+-------------------------+----------+-------+--------------------------------+"
 
-# Sort alias names for consistent output
 SORTED_ALIASES=($(echo "${!ALIAS_WWNS[@]}" | tr ' ' '\n' | sort))
 
 for alias_name in "${SORTED_ALIASES[@]}"; do
@@ -654,7 +907,6 @@ wwn="${ALIAS_WWNS[$alias_name]}"
 alias_display=$(printf "%-32s" "$alias_name")
 wwn_display=$(printf "%-23s" "$wwn")
 
-# Run nodefind for this specific WWN
 nodefind_output=$(run_cmd "nodefind ${wwn}" "nodefind for alias ${alias_name} (${wwn})" 2>/dev/null) || {
 log " !!! Failed to run nodefind for ${alias_name} (${wwn})"
 log_raw " | ${alias_display} | ${wwn_display} | ERROR | --- | nodefind command failed |"
@@ -662,86 +914,34 @@ WWN_MISSING=$((WWN_MISSING + 1))
 continue
 }
 
-# Log the full nodefind output for audit trail
 echo "--- nodefind ${wwn} (${alias_name}) ---" >> "$LOG_FILE"
 echo "$nodefind_output" >> "$LOG_FILE"
 echo "--- end nodefind ---" >> "$LOG_FILE"
 
-# Check if the device was found
-# nodefind returns lines with "Port Index:" and PID info if found,
-# or "No device found" / empty relevant output if not found
-if echo "$nodefind_output" | grep -qi "No device found"; then
-# Device is NOT logged in
-detail_display=$(printf "%-30s" "Not logged in to fabric")
-log_raw " | ${alias_display} | ${wwn_display} | *** NO ***| --- | ${detail_display} |"
-WWN_MISSING=$((WWN_MISSING + 1))
+nodefind_parsed=$(parse_nodefind_output "$nodefind_output")
+IFS='|' read -r nodefind_status port_found speed_info detail <<< "$nodefind_parsed"
 
-elif echo "$nodefind_output" | grep -qi "Port Index"; then
-# Device IS logged in — extract port index
-port_found="?"
-port_line=$(echo "$nodefind_output" | grep -i "Port Index" | head -1)
-if [[ "$port_line" =~ Port[[:space:]]+Index:[[:space:]]*([0-9]+) ]]; then
-port_found="${BASH_REMATCH[1]}"
-fi
-
-# Extract device type info if available (NodeSymb line)
-device_info=""
-nodesymb_line=$(echo "$nodefind_output" | grep -i "NodeSymb" | head -1)
-if [[ -n "$nodesymb_line" ]]; then
-# Extract hostname from NodeSymb, e.g.:
-# NodeSymb: [85] "Emulex ... HN:ctlnp1-pdbsa.eu-citi.zl. OS:Linux"
-if [[ "$nodesymb_line" =~ HN:([^[:space:]\.]+) ]]; then
-device_info="HN:${BASH_REMATCH[1]}"
-elif [[ "$nodesymb_line" =~ \"([^\"]+)\" ]]; then
-# Fallback: first 28 chars of the symbol string
-device_info="${BASH_REMATCH[1]:0:28}"
-fi
-fi
-
-# Check link speed
-speed_info=""
-speed_line=$(echo "$nodefind_output" | grep -i "Device link speed" | head -1)
-if [[ "$speed_line" =~ Device[[:space:]]+link[[:space:]]+speed:[[:space:]]*([0-9]+G) ]]; then
-speed_info="${BASH_REMATCH[1]}"
-fi
-
-# Build detail string
-detail="${device_info}"
-if [[ -n "$speed_info" ]]; then
-detail="${detail:+${detail} }${speed_info}"
-fi
-if [[ -z "$detail" ]]; then
-detail="Found"
-fi
-
-port_display=$(printf "%-5s" "$port_found")
+case "$nodefind_status" in
+FOUND)
+port_display=$(printf "%-5s" "${port_found:-?}")
 detail_display=$(printf "%-30s" "$detail")
 log_raw " | ${alias_display} | ${wwn_display} | YES | ${port_display} | ${detail_display} |"
 WWN_FOUND=$((WWN_FOUND + 1))
-
-elif echo "$nodefind_output" | grep -q "$wwn"; then
-# WWN appears in output but format is unexpected — likely found
-# This handles variations in nodefind output across FOS versions
-
-# Try to extract port from "Remote switch" or "Local" line
-port_found="?"
-if [[ "$nodefind_output" =~ Port:[[:space:]]*([0-9]+) ]]; then
-port_found="${BASH_REMATCH[1]}"
-fi
-
-port_display=$(printf "%-5s" "$port_found")
-detail_display=$(printf "%-30s" "Found (non-standard output)")
-log_raw " | ${alias_display} | ${wwn_display} | YES | ${port_display} | ${detail_display} |"
-WWN_FOUND=$((WWN_FOUND + 1))
-
-else
-# Neither "No device found" nor recognizable output — treat as missing
-detail_display=$(printf "%-30s" "Unrecognized nodefind output")
+;;
+AMBIGUOUS)
+port_display=$(printf "%-5s" "${port_found:-?}")
+detail_display=$(printf "%-30s" "$detail")
+log_raw " | ${alias_display} | ${wwn_display} | ??? | ${port_display} | ${detail_display} |"
+WWN_MISSING=$((WWN_MISSING + 1))
+;;
+NOT_FOUND|*)
+detail_display=$(printf "%-30s" "$detail")
 log_raw " | ${alias_display} | ${wwn_display} | *** NO ***| --- | ${detail_display} |"
 WWN_MISSING=$((WWN_MISSING + 1))
-fi
+;;
+esac
 
-sleep 1 # Delay between nodefind calls for switch stability
+sleep 1
 done
 
 log_raw " +----------------------------------+-------------------------+----------+-------+--------------------------------+"
@@ -806,7 +1006,6 @@ log " Missing: ${WWN_MISSING}"
 log ""
 fi
 
-# Overall result
 OVERALL="PASS"
 if [[ $EXPECTED_MISSING -gt 0 || $SFP_CRIT -gt 0 || $WWN_MISSING -gt 0 ]]; then
 OVERALL="FAIL"
