@@ -179,12 +179,50 @@ fi
 log ""
 }
 
-# ========================= UTILITY: TRIM WHITESPACE ===================
+# ========================= UTILITY ====================================
 trim() {
 local var="$1"
-var="${var#"${var%%[![:space:]]*}"}" # Leading
-var="${var%"${var##*[![:space:]]}"}" # Trailing
+var="${var#"${var%%[![:space:]]*}"}"
+var="${var%"${var##*[![:space:]]}"}"
 echo "$var"
+}
+
+normalize_wwn() {
+local raw="$1"
+local hex=""
+hex=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')
+if [[ ${#hex} -ne 16 ]]; then
+return 1
+fi
+printf '%s:%s:%s:%s:%s:%s:%s:%s\n' \
+"${hex:0:2}" "${hex:2:2}" "${hex:4:2}" "${hex:6:2}" \
+"${hex:8:2}" "${hex:10:2}" "${hex:12:2}" "${hex:14:2}"
+}
+
+validate_brocade_object_name() {
+local value="$1"
+[[ "$value" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
+# ========================= LIST PARSERS ===============================
+parse_semicolon_members() {
+local raw="$1"
+local normalized=""
+local token=""
+local -a parsed=()
+
+normalized=$(echo "$raw" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
+IFS=';' read -ra _tokens <<< "$normalized"
+for token in "${_tokens[@]}"; do
+token=$(trim "$token")
+if [[ -z "$token" ]]; then
+printf 'EMPTY_TOKEN\n'
+return 1
+fi
+parsed+=("$token")
+done
+printf '%s\n' "${parsed[@]}"
+return 0
 }
 
 # ========================= PRE-FLIGHT =================================
@@ -211,7 +249,6 @@ log " Log File : ${LOG_FILE}"
 log "======================================================================"
 log ""
 
-# Verify all input files exist
 MISSING=false
 for f in "$ALIAS_FILE" "$ZONE_FILE" "$CFG_FILE"; do
 if [[ ! -f "$f" ]]; then
@@ -241,7 +278,6 @@ fi
 if [[ "$DRY_RUN" == false ]]; then
 log "Testing SSH connectivity to ${SWITCH_IP}..."
 run_cmd "switchstatusshow" "Pre-flight: verify connectivity and switch health"
-
 log ""
 log "Press ENTER to proceed with zoning changes, or CTRL+C to abort..."
 read -r
@@ -249,13 +285,13 @@ fi
 
 log "========== Script started =========="
 
-
 # ======================================================================
 # STEP 1: PARSE AND CREATE ALIASES
 # ======================================================================
 log "============ STEP 1: CREATE ALIASES (from ${ALIAS_FILE}) ============"
 
 declare -A CREATED_ALIASES
+declare -A WWN_TO_ALIAS
 
 ALIAS_NAME=""
 ALIAS_COUNT=0
@@ -265,34 +301,60 @@ line=$(trim "$line")
 [[ -z "$line" || "$line" =~ ^# ]] && continue
 
 if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
-ALIAS_NAME=$(trim "${BASH_REMATCH[1]}")
-
-elif [[ "$line" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}$ ]]; then
-if [[ -z "$ALIAS_NAME" ]]; then
-log "!!! ERROR: WWN '${line}' found without preceding 'alias:' line"
+if [[ -n "$ALIAS_NAME" ]]; then
+log "!!! PARSER ERROR: Alias '${ALIAS_NAME}' did not receive a WWN before the next alias header"
 exit 1
 fi
 
-run_cmd "alicreate '${ALIAS_NAME}', '${line}'" \
-"Create alias: ${ALIAS_NAME} -> ${line}"
+ALIAS_NAME=$(trim "${BASH_REMATCH[1]}")
 
-CREATED_ALIASES["${ALIAS_NAME}"]=1
+if ! validate_brocade_object_name "$ALIAS_NAME"; then
+log "!!! PARSER ERROR: Alias name '${ALIAS_NAME}' contains unsupported characters"
+exit 1
+fi
+
+if [[ -n "${CREATED_ALIASES[$ALIAS_NAME]+_}" ]]; then
+log "!!! PARSER ERROR: Duplicate alias name '${ALIAS_NAME}' in ${ALIAS_FILE}"
+exit 1
+fi
+
+elif [[ "$line" =~ ^[0-9a-fA-F:]+$ ]]; then
+if [[ -z "$ALIAS_NAME" ]]; then
+log "!!! PARSER ERROR: WWN '${line}' found without preceding 'alias:' line"
+exit 1
+fi
+
+normalized_wwn=$(normalize_wwn "$line" || true)
+if [[ -z "$normalized_wwn" ]]; then
+log "!!! PARSER ERROR: Invalid WWN '${line}' in ${ALIAS_FILE}"
+exit 1
+fi
+
+if [[ -n "${WWN_TO_ALIAS[$normalized_wwn]+_}" ]]; then
+log "!!! PARSER ERROR: Duplicate WWN '${normalized_wwn}' already assigned to alias '${WWN_TO_ALIAS[$normalized_wwn]}'"
+exit 1
+fi
+
+run_cmd "alicreate '${ALIAS_NAME}', '${normalized_wwn}'" \
+"Create alias: ${ALIAS_NAME} -> ${normalized_wwn}"
+
+CREATED_ALIASES["${ALIAS_NAME}"]="$normalized_wwn"
+WWN_TO_ALIAS["${normalized_wwn}"]="$ALIAS_NAME"
 ALIAS_COUNT=$((ALIAS_COUNT + 1))
 ALIAS_NAME=""
-
 else
-log "!!! WARNING: Unrecognized line in ${ALIAS_FILE}: ${line}"
+log "!!! PARSER ERROR: Unrecognized line in ${ALIAS_FILE}: ${line}"
+exit 1
 fi
 done < "$ALIAS_FILE"
 
 if [[ -n "$ALIAS_NAME" ]]; then
-log "!!! ERROR: Alias '${ALIAS_NAME}' has no corresponding WWN"
+log "!!! PARSER ERROR: Alias '${ALIAS_NAME}' has no corresponding WWN"
 exit 1
 fi
 
 log " Aliases created: ${ALIAS_COUNT}"
 log ""
-
 
 # ======================================================================
 # STEP 2: PARSE, VALIDATE, AND CREATE ZONES
@@ -305,43 +367,67 @@ ZONE_MEMBERS_RAW=""
 ZONE_COUNT=0
 VALIDATION_ERRORS=0
 
+actionable_zone_parse_errors=0
+
 process_zone() {
 local z_name="$1"
 local z_members_raw="$2"
+local -a members_array=()
+local -A SEEN_ZONE_MEMBERS=()
+local brocade_members=""
+local member=""
 
-local normalized
-normalized=$(echo "$z_members_raw" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
+if ! validate_brocade_object_name "$z_name"; then
+log "!!! PARSER ERROR: Zone name '${z_name}' contains unsupported characters"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+fi
 
-local IFS=';'
-local members_array=()
-for member in $normalized; do
-member=$(trim "$member")
-[[ -z "$member" ]] && continue
+if [[ -n "${CREATED_ZONES[$z_name]+_}" ]]; then
+log "!!! PARSER ERROR: Duplicate zone name '${z_name}' in ${ZONE_FILE}"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+fi
+
+mapfile -t members_array < <(parse_semicolon_members "$z_members_raw") || {
+log "!!! PARSER ERROR: Zone '${z_name}' contains empty or malformed member tokens"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+}
+
+if [[ ${#members_array[@]} -eq 0 ]]; then
+log "!!! PARSER ERROR: Zone '${z_name}' has no members"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+fi
+
+for member in "${members_array[@]}"; do
+if ! validate_brocade_object_name "$member"; then
+log "!!! PARSER ERROR: Zone '${z_name}' contains invalid member token '${member}'"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+fi
+
+if [[ -n "${SEEN_ZONE_MEMBERS[$member]+_}" ]]; then
+log "!!! PARSER ERROR: Zone '${z_name}' repeats member '${member}'"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+return
+fi
+SEEN_ZONE_MEMBERS["$member"]=1
 
 if [[ -z "${CREATED_ALIASES[$member]+_}" ]]; then
 log "!!! VALIDATION ERROR: Zone '${z_name}' references alias '${member}' which was NOT defined in ${ALIAS_FILE}"
 VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
 fi
 
-members_array+=("$member")
-done
-
-if [[ ${#members_array[@]} -eq 0 ]]; then
-log "!!! ERROR: Zone '${z_name}' has no members"
-VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-return
-fi
-
-local brocade_members=""
-for m in "${members_array[@]}"; do
 if [[ -z "$brocade_members" ]]; then
-brocade_members="$m"
+brocade_members="$member"
 else
-brocade_members="${brocade_members};${m}"
+brocade_members="${brocade_members};${member}"
 fi
 done
 
-if [[ $VALIDATION_ERRORS -eq 0 ]]; then
+if [[ $VALIDATION_ERRORS -eq 0 && $actionable_zone_parse_errors -eq 0 ]]; then
 run_cmd "zonecreate '${z_name}', '${brocade_members}'" \
 "Create zone: ${z_name} (${#members_array[@]} members)"
 
@@ -370,6 +456,13 @@ if [[ -n "$ZONE_NAME" ]]; then
 process_zone "$ZONE_NAME" "$ZONE_MEMBERS_RAW"
 fi
 
+if [[ $actionable_zone_parse_errors -gt 0 ]]; then
+log ""
+log "!!! ABORTING: ${actionable_zone_parse_errors} zone parser error(s) found."
+log "!!! Fix the malformed zone definitions and re-run."
+exit 1
+fi
+
 if [[ $VALIDATION_ERRORS -gt 0 ]]; then
 log ""
 log "!!! ABORTING: ${VALIDATION_ERRORS} validation error(s) found."
@@ -381,7 +474,6 @@ fi
 log " Zones created: ${ZONE_COUNT}"
 log ""
 
-
 # ======================================================================
 # STEP 3: PARSE, VALIDATE, AND CREATE ZONE CONFIGURATION
 # ======================================================================
@@ -390,6 +482,8 @@ log "============ STEP 3: CREATE ZONE CONFIG (from ${CFG_FILE}) ============"
 CFG_NAME=""
 CFG_MEMBERS_RAW=""
 CFG_COUNT=0
+VALIDATION_ERRORS=0
+CFG_PARSE_ERRORS=0
 
 while IFS= read -r line || [[ -n "$line" ]]; do
 line=$(trim "$line")
@@ -397,7 +491,7 @@ line=$(trim "$line")
 
 if [[ "$line" =~ ^cfg:[[:space:]]*(.+)$ ]]; then
 if [[ -n "$CFG_NAME" ]]; then
-log "!!! ERROR: Multiple configs found in ${CFG_FILE}. Only one config per file is supported."
+log "!!! PARSER ERROR: Multiple configs found in ${CFG_FILE}. Only one config per file is supported."
 exit 1
 fi
 CFG_NAME=$(trim "${BASH_REMATCH[1]}")
@@ -407,25 +501,67 @@ fi
 done < "$CFG_FILE"
 
 if [[ -z "$CFG_NAME" ]]; then
-log "!!! ERROR: No 'cfg:' line found in ${CFG_FILE}"
+log "!!! PARSER ERROR: No 'cfg:' line found in ${CFG_FILE}"
 exit 1
 fi
 
-CFG_MEMBERS_NORMALIZED=$(echo "$CFG_MEMBERS_RAW" | tr '\n' ' ' | sed 's/[[:space:]]*;[[:space:]]*/;/g' | sed 's/^;//;s/;$//')
+if ! validate_brocade_object_name "$CFG_NAME"; then
+log "!!! PARSER ERROR: Config name '${CFG_NAME}' contains unsupported characters"
+exit 1
+fi
 
-VALIDATION_ERRORS=0
-IFS=';' read -ra CFG_ZONE_ARRAY <<< "$CFG_MEMBERS_NORMALIZED"
+mapfile -t CFG_ZONE_ARRAY < <(parse_semicolon_members "$CFG_MEMBERS_RAW") || {
+log "!!! PARSER ERROR: Config '${CFG_NAME}' contains empty or malformed zone tokens"
+exit 1
+}
 
+if [[ ${#CFG_ZONE_ARRAY[@]} -eq 0 ]]; then
+log "!!! PARSER ERROR: Config '${CFG_NAME}' has no zone members"
+exit 1
+fi
+
+declare -A SEEN_CFG_ZONES=()
+CFG_BROCADE_MEMBERS=""
 for zone_ref in "${CFG_ZONE_ARRAY[@]}"; do
 zone_ref=$(trim "$zone_ref")
-[[ -z "$zone_ref" ]] && continue
+[[ -z "$zone_ref" ]] && {
+CFG_PARSE_ERRORS=$((CFG_PARSE_ERRORS + 1))
+continue
+}
+
+if ! validate_brocade_object_name "$zone_ref"; then
+log "!!! PARSER ERROR: Config '${CFG_NAME}' contains invalid zone token '${zone_ref}'"
+CFG_PARSE_ERRORS=$((CFG_PARSE_ERRORS + 1))
+continue
+fi
+
+if [[ -n "${SEEN_CFG_ZONES[$zone_ref]+_}" ]]; then
+log "!!! PARSER ERROR: Config '${CFG_NAME}' repeats zone '${zone_ref}'"
+CFG_PARSE_ERRORS=$((CFG_PARSE_ERRORS + 1))
+continue
+fi
+SEEN_CFG_ZONES["$zone_ref"]=1
+
 CFG_COUNT=$((CFG_COUNT + 1))
 
 if [[ -z "${CREATED_ZONES[$zone_ref]+_}" ]]; then
 log "!!! VALIDATION ERROR: Config '${CFG_NAME}' references zone '${zone_ref}' which was NOT defined in ${ZONE_FILE}"
 VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
 fi
+
+if [[ -z "$CFG_BROCADE_MEMBERS" ]]; then
+CFG_BROCADE_MEMBERS="$zone_ref"
+else
+CFG_BROCADE_MEMBERS="${CFG_BROCADE_MEMBERS};${zone_ref}"
+fi
 done
+
+if [[ $CFG_PARSE_ERRORS -gt 0 ]]; then
+log ""
+log "!!! ABORTING: ${CFG_PARSE_ERRORS} config parser error(s) found."
+log "!!! Fix the malformed config definition and re-run."
+exit 1
+fi
 
 if [[ $VALIDATION_ERRORS -gt 0 ]]; then
 log ""
@@ -435,23 +571,11 @@ log "!!! Fix the input files and re-run."
 exit 1
 fi
 
-CFG_BROCADE_MEMBERS=""
-for zone_ref in "${CFG_ZONE_ARRAY[@]}"; do
-zone_ref=$(trim "$zone_ref")
-[[ -z "$zone_ref" ]] && continue
-if [[ -z "$CFG_BROCADE_MEMBERS" ]]; then
-CFG_BROCADE_MEMBERS="$zone_ref"
-else
-CFG_BROCADE_MEMBERS="${CFG_BROCADE_MEMBERS};${zone_ref}"
-fi
-done
-
 run_cmd "cfgcreate '${CFG_NAME}', '${CFG_BROCADE_MEMBERS}'" \
 "Create zone config: ${CFG_NAME} (${CFG_COUNT} zone members)"
 
 log " Config created: ${CFG_NAME} with ${CFG_COUNT} zones"
 log ""
-
 
 # ======================================================================
 # STEP 4: SAVE CONFIGURATION
@@ -472,7 +596,6 @@ fi
 
 run_cmd_confirm "cfgsave" "Save zone database to flash memory"
 
-
 # ======================================================================
 # STEP 5: ENABLE CONFIGURATION
 # ======================================================================
@@ -491,7 +614,6 @@ read -r
 fi
 
 run_cmd_confirm "cfgenable '${CFG_NAME}'" "Enable effective configuration: ${CFG_NAME}"
-
 
 # ======================================================================
 # STEP 6: VERIFY

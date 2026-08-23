@@ -13,49 +13,6 @@
 # AUTHENTICATION:
 # - SSH key only. Password authentication is intentionally disabled.
 # - Supports an optional identity file via --ssh-key.
-#
-# USAGE:
-# chmod +x check_ports.sh
-#
-# # Auto-detect up ports from show interface brief
-# ./check_ports.sh --switch-ip 10.154.81.7
-#
-# # Specify SSH key explicitly
-# ./check_ports.sh --switch-ip 10.154.81.7 --ssh-key ~/.ssh/id_ed25519
-#
-# # Use a dedicated known_hosts file
-# ./check_ports.sh --switch-ip 10.154.81.7 --known-hosts-file ./known_hosts
-#
-# # Lab-only override: disable host key verification
-# ./check_ports.sh --switch-ip 10.154.81.7 --insecure-hostkey
-#
-# # Specify expected ports (comma-separated, Cisco format)
-# ./check_ports.sh --switch-ip 10.154.81.7 \
-# --ports fc1/1,fc1/2,fc1/3,fc1/4
-#
-# # Specify expected ports from a file (one interface per line)
-# ./check_ports.sh --switch-ip 10.154.81.7 \
-# --port-file expected_ports.txt
-#
-# # Also verify WWN logins against alias file
-# ./check_ports.sh --switch-ip 10.154.81.7 \
-# --alias-file aliases.txt --vsan 100
-#
-# # Dry run
-# ./check_ports.sh --switch-ip 10.154.81.7 --dry-run
-#
-# PORT FILE FORMAT (expected_ports.txt):
-# One Cisco interface name per line. Comments (#) and blank lines ignored.
-# fc1/1
-# fc1/2
-# # Storage ports
-# fc1/23
-# fc1/24
-#
-# SFP POWER THRESHOLDS:
-# Defaults based on typical SWL 8G/16G/32G SFP specs:
-# RX Power: WARN < -14.0 dBm, CRIT < -17.0 dBm
-# TX Power: WARN < -8.0 dBm, CRIT < -12.0 dBm
 ##############################################################################
 
 set -euo pipefail
@@ -210,31 +167,6 @@ return 0
 fi
 }
 
-run_cmd_confirm() {
-local cmd="$1"
-local description="${2:-}"
-
-if [[ -n "$description" ]]; then
-log "# $description"
-fi
-log ">>> $cmd (with auto-confirm)"
-
-if [[ "$DRY_RUN" == false ]]; then
-local output
-mapfile -t ssh_cmd < <(build_ssh_cmd)
-output=$(printf 'y\n' | "${ssh_cmd[@]}" "terminal length 0 ; ${cmd}" 2>&1) || {
-log "!!! COMMAND FAILED: $cmd"
-log "!!! Output: $output"
-return 1
-}
-echo "$output"
-return 0
-else
-echo "(dry-run: no output)"
-return 0
-fi
-}
-
 # ========================= UTILITY ====================================
 trim() {
 local var="$1"
@@ -245,6 +177,298 @@ echo "$var"
 
 float_lt() {
 awk "BEGIN { exit !($1 < $2) }"
+}
+
+normalize_wwn() {
+local raw="$1"
+local hex=""
+hex=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')
+if [[ ${#hex} -ne 16 ]]; then
+return 1
+fi
+printf '%s:%s:%s:%s:%s:%s:%s:%s\n' \
+"${hex:0:2}" "${hex:2:2}" "${hex:4:2}" "${hex:6:2}" \
+"${hex:8:2}" "${hex:10:2}" "${hex:12:2}" "${hex:14:2}"
+}
+
+# ========================= INPUT VALIDATION HELPERS ===================
+validate_cisco_port_token() {
+local port_value="$1"
+[[ "$port_value" =~ ^fc[0-9]+/[0-9]+$ ]]
+}
+
+add_expected_port() {
+local port_value="$1"
+if ! validate_cisco_port_token "$port_value"; then
+log "ERROR: Invalid Cisco interface '${port_value}' — expected format like fc1/23"
+exit 1
+fi
+EXPECTED_PORT_MAP["$port_value"]=1
+}
+
+# ========================= INTERFACE BRIEF PARSERS ====================
+parse_interface_brief_line() {
+local line="$1"
+local trimmed_line=""
+local intf=""
+local vsan=""
+local status=""
+local tail=""
+
+trimmed_line=$(trim "$line")
+[[ -z "$trimmed_line" ]] && return 1
+[[ "$trimmed_line" =~ ^[-=]+$ ]] && return 1
+[[ "$trimmed_line" =~ ^(Interface|Port|Mode|Status|IP[[:space:]]+Address) ]] && return 1
+
+if [[ "$trimmed_line" =~ ^(fc[0-9]+/[0-9]+)[[:space:]]+([0-9-]+)[[:space:]]+(.*)$ ]]; then
+intf="${BASH_REMATCH[1]}"
+vsan="${BASH_REMATCH[2]}"
+tail="${BASH_REMATCH[3]}"
+else
+return 1
+fi
+
+case "$tail" in
+*" admin down "*|*" admin-down "*) status="admin down" ;;
+*" sfpAbsent "*) status="sfpAbsent" ;;
+*" noOperMembers "*) status="noOperMembers" ;;
+*" trunking "*) status="trunking" ;;
+*" up "*) status="up" ;;
+*" down "*) status="down" ;;
+*) status="unknown" ;;
+esac
+
+printf '%s|%s|%s\n' "$intf" "$vsan" "$status"
+return 0
+}
+
+parse_interface_brief_output() {
+local input="$1"
+local parsed=""
+while IFS= read -r line; do
+parsed=$(parse_interface_brief_line "$line") || continue
+printf '%s\n' "$parsed"
+done <<< "$input"
+}
+
+get_interface_brief_state_for_port() {
+local target_port="$1"
+local input="$2"
+local parsed=""
+local local_intf=""
+local local_vsan=""
+local local_status=""
+
+while IFS= read -r line; do
+parsed=$(parse_interface_brief_line "$line") || continue
+IFS='|' read -r local_intf local_vsan local_status <<< "$parsed"
+if [[ "$local_intf" == "$target_port" ]]; then
+printf '%s\n' "$local_status"
+return 0
+fi
+done <<< "$input"
+
+return 1
+}
+
+# ========================= SFP PARSERS ================================
+extract_cisco_power_dbm() {
+local label="$1"
+local input="$2"
+local normalized=""
+local matched_line=""
+
+normalized=$(printf '%s\n' "$input" | tr -d '\r')
+matched_line=$(echo "$normalized" | grep -iE "${label}[[:space:]]*Power[[:space:]]*:|${label}[[:space:]]*Power" | head -1 || true)
+
+if [[ -n "$matched_line" && "$matched_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
+printf '%s\n' "${BASH_REMATCH[1]}"
+return 0
+fi
+
+return 1
+}
+
+parse_cisco_sfp_output() {
+local input="$1"
+local rx_dbm=""
+local tx_dbm=""
+local parse_status=""
+
+rx_dbm=$(extract_cisco_power_dbm "Rx" "$input" || true)
+tx_dbm=$(extract_cisco_power_dbm "Tx" "$input" || true)
+
+if [[ -n "$rx_dbm" && -n "$tx_dbm" ]]; then
+parse_status="BOTH"
+elif [[ -n "$rx_dbm" ]]; then
+parse_status="RX_ONLY"
+elif [[ -n "$tx_dbm" ]]; then
+parse_status="TX_ONLY"
+else
+parse_status="NONE"
+fi
+
+printf '%s|%s|%s\n' "$parse_status" "$rx_dbm" "$tx_dbm"
+}
+
+# ========================= ERROR COUNTER PARSERS ======================
+parse_cisco_error_counter_line() {
+local line="$1"
+local trimmed_line=""
+local intf=""
+local remainder=""
+local -a raw_tokens=()
+local numeric_values=""
+local value=""
+
+trimmed_line=$(trim "$line")
+[[ -z "$trimmed_line" ]] && return 1
+[[ "$trimmed_line" =~ ^[-=]+$ ]] && return 1
+[[ "$trimmed_line" =~ ^(Interface|ifInErrors|ifOutErrors|CRC|Symbol|Port) ]] && return 1
+
+if [[ "$trimmed_line" =~ ^(fc[0-9]+/[0-9]+)[[:space:]]+(.*)$ ]]; then
+intf="${BASH_REMATCH[1]}"
+remainder="${BASH_REMATCH[2]}"
+else
+return 1
+fi
+
+read -r -a raw_tokens <<< "$remainder"
+[[ ${#raw_tokens[@]} -eq 0 ]] && return 1
+
+for value in "${raw_tokens[@]}"; do
+if [[ "$value" =~ ^[0-9]+$ ]]; then
+numeric_values+="${numeric_values:+ }$value"
+fi
+done
+
+[[ -z "$numeric_values" ]] && return 1
+printf '%s|%s\n' "$intf" "$numeric_values"
+return 0
+}
+
+get_cisco_error_values_for_port() {
+local target_port="$1"
+local input="$2"
+local parsed=""
+local local_intf=""
+local local_values=""
+
+while IFS= read -r line; do
+parsed=$(parse_cisco_error_counter_line "$line") || continue
+IFS='|' read -r local_intf local_values <<< "$parsed"
+if [[ "$local_intf" == "$target_port" ]]; then
+printf '%s\n' "$local_values"
+return 0
+fi
+done <<< "$input"
+
+return 1
+}
+
+cisco_error_values_have_nonzero_errors() {
+local values="$1"
+local val=""
+for val in $values; do
+if [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]]; then
+return 0
+fi
+done
+return 1
+}
+
+# ========================= WWN DATABASE PARSERS =======================
+parse_flogi_fcns_match() {
+local wwn="$1"
+local flogi_input="$2"
+local fcns_input="$3"
+local canonical_wwn=""
+local raw_line=""
+local norm_line=""
+local port_found=""
+
+canonical_wwn=$(normalize_wwn "$wwn" || true)
+[[ -z "$canonical_wwn" ]] && {
+printf 'NOT_FOUND|||\n'
+return 0
+}
+
+while IFS= read -r raw_line; do
+raw_line=$(printf '%s' "$raw_line" | tr -d '\r')
+norm_line=$(normalize_wwn "$raw_line" 2>/dev/null || true)
+if [[ "$raw_line" == *"$canonical_wwn"* || "$norm_line" == "$canonical_wwn" ]]; then
+if [[ "$raw_line" =~ (fc[0-9]+/[0-9]+) ]]; then
+port_found="${BASH_REMATCH[1]}"
+fi
+printf 'FOUND|%s|FLOGI (local)\n' "${port_found:-?}"
+return 0
+fi
+done <<< "$flogi_input"
+
+while IFS= read -r raw_line; do
+raw_line=$(printf '%s' "$raw_line" | tr -d '\r')
+norm_line=$(normalize_wwn "$raw_line" 2>/dev/null || true)
+if [[ "$raw_line" == *"$canonical_wwn"* || "$norm_line" == "$canonical_wwn" ]]; then
+printf 'FOUND|remote|FCNS (remote)\n'
+return 0
+fi
+done <<< "$fcns_input"
+
+printf 'NOT_FOUND|||\n'
+return 0
+}
+
+# ========================= ALIAS FILE PARSERS =========================
+load_alias_file() {
+local alias_file="$1"
+local line=""
+local current_alias=""
+local normalized_wwn=""
+
+declare -gA ALIAS_WWNS=()
+declare -gA WWN_ALIAS_MAP=()
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+line=$(trim "$line")
+[[ -z "$line" || "$line" =~ ^# ]] && continue
+
+if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
+current_alias=$(trim "${BASH_REMATCH[1]}")
+[[ -z "$current_alias" ]] && {
+log "ERROR: Empty alias name found in ${alias_file}"
+exit 1
+}
+if [[ -n "${ALIAS_WWNS[$current_alias]+_}" ]]; then
+log "ERROR: Duplicate alias name '${current_alias}' found in ${alias_file}"
+exit 1
+fi
+elif [[ "$line" =~ ^[0-9a-fA-F:]+$ ]]; then
+if [[ -z "$current_alias" ]]; then
+log "ERROR: WWN '${line}' found without preceding alias in ${alias_file}"
+exit 1
+fi
+normalized_wwn=$(normalize_wwn "$line" || true)
+if [[ -z "$normalized_wwn" ]]; then
+log "ERROR: Invalid WWN '${line}' found in ${alias_file}"
+exit 1
+fi
+if [[ -n "${WWN_ALIAS_MAP[$normalized_wwn]+_}" ]]; then
+log "ERROR: Duplicate WWN '${normalized_wwn}' found in ${alias_file}"
+exit 1
+fi
+ALIAS_WWNS["$current_alias"]="$normalized_wwn"
+WWN_ALIAS_MAP["$normalized_wwn"]="$current_alias"
+current_alias=""
+else
+log "ERROR: Unrecognized alias-file line '${line}' in ${alias_file}"
+exit 1
+fi
+done < "$alias_file"
+
+if [[ -n "$current_alias" ]]; then
+log "ERROR: Alias '${current_alias}' has no WWN in ${alias_file}"
+exit 1
+fi
 }
 
 # ========================= PRE-FLIGHT =================================
@@ -337,18 +561,13 @@ declare -A UP_PORT_MAP
 declare -A PORT_VSAN_MAP
 
 if [[ "$DRY_RUN" == false && -n "$INTF_BRIEF_OUTPUT" ]]; then
-while IFS= read -r line; do
-if [[ "$line" =~ ^[[:space:]]*(fc[0-9]+/[0-9]+)[[:space:]]+([0-9-]+)[[:space:]]+([A-Za-z_-]+)[[:space:]]+([a-zA-Z0-9]+)[[:space:]]+([0-9GMK-]+)[[:space:]]+([a-zA-Z]+) ]]; then
-local_intf="${BASH_REMATCH[1]}"
-local_vsan="${BASH_REMATCH[2]}"
-local_status="${BASH_REMATCH[6]}"
-
-if [[ "$local_status" == "up" ]]; then
+while IFS='|' read -r local_intf local_vsan local_status; do
+[[ -z "$local_intf" ]] && continue
+if [[ "$local_status" == "up" || "$local_status" == "trunking" ]]; then
 UP_PORT_MAP["${local_intf}"]=1
 PORT_VSAN_MAP["${local_intf}"]="${local_vsan}"
 fi
-fi
-done <<< "$INTF_BRIEF_OUTPUT"
+done < <(parse_interface_brief_output "$INTF_BRIEF_OUTPUT")
 
 log " Up ports detected: ${!UP_PORT_MAP[*]}"
 log " Total up: ${#UP_PORT_MAP[@]}"
@@ -359,14 +578,14 @@ IFS=',' read -ra PORT_ARRAY <<< "$EXPECTED_PORTS"
 for p in "${PORT_ARRAY[@]}"; do
 p=$(trim "$p")
 [[ -z "$p" ]] && continue
-EXPECTED_PORT_MAP["$p"]=1
+add_expected_port "$p"
 done
 log " Expected ports (from --ports): ${!EXPECTED_PORT_MAP[*]}"
 elif [[ -n "$PORT_FILE" ]]; then
 while IFS= read -r line || [[ -n "$line" ]]; do
 line=$(trim "$line")
 [[ -z "$line" || "$line" =~ ^# ]] && continue
-EXPECTED_PORT_MAP["$line"]=1
+add_expected_port "$line"
 done < "$PORT_FILE"
 log " Expected ports (from ${PORT_FILE}): ${!EXPECTED_PORT_MAP[*]}"
 else
@@ -378,6 +597,14 @@ fi
 
 EXPECTED_TOTAL=${#EXPECTED_PORT_MAP[@]}
 log " Total expected ports: ${EXPECTED_TOTAL}"
+
+for port_intf in "${!EXPECTED_PORT_MAP[@]}"; do
+if [[ "$DRY_RUN" == false && -z "${UP_PORT_MAP[$port_intf]+_}" ]]; then
+if ! get_interface_brief_state_for_port "$port_intf" "$INTF_BRIEF_OUTPUT" >/dev/null 2>&1; then
+log " !!! Requested interface ${port_intf} does not appear in show interface brief output"
+fi
+fi
+done
 log ""
 
 # ======================================================================
@@ -387,9 +614,9 @@ log "============ STEP 3: VALIDATE EXPECTED PORTS ============"
 
 if [[ "$DRY_RUN" == false ]]; then
 log ""
-log_raw " +------------+----------+------+"
+log_raw " +------------+----------------------+------+"
 log_raw " | Interface | Status | VSAN |"
-log_raw " +------------+----------+------+"
+log_raw " +------------+----------------------+------+"
 
 SORTED_EXPECTED=($(echo "${!EXPECTED_PORT_MAP[@]}" | tr ' ' '\n' | sort -t'/' -k1,1 -k2,2n))
 
@@ -399,31 +626,34 @@ port_display=$(printf "%-10s" "$port_intf")
 if [[ -n "${UP_PORT_MAP[$port_intf]+_}" ]]; then
 vsan_val="${PORT_VSAN_MAP[$port_intf]:-?}"
 vsan_display=$(printf "%-4s" "$vsan_val")
-log_raw " | ${port_display} | UP | ${vsan_display} |"
+log_raw " | ${port_display} | UP/TRUNKING | ${vsan_display} |"
 PORTS_UP=$((PORTS_UP + 1))
 else
 actual_state="NOT UP"
+parsed_state=$(get_interface_brief_state_for_port "$port_intf" "$INTF_BRIEF_OUTPUT" || true)
 
-if [[ -n "$INTF_BRIEF_OUTPUT" ]]; then
-state_line=$(echo "$INTF_BRIEF_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1 || true)
-if [[ -n "$state_line" ]]; then
-if [[ "$state_line" =~ sfpAbsent ]]; then
+case "$parsed_state" in
+sfpAbsent)
 actual_state="NO SFP"
 PORTS_NO_SFP=$((PORTS_NO_SFP + 1))
-elif [[ "$state_line" =~ down ]]; then
+;;
+down|admin\ down)
 actual_state="DOWN"
 PORTS_DOWN=$((PORTS_DOWN + 1))
-elif [[ "$state_line" =~ noOperMembers ]]; then
+;;
+noOperMembers)
 actual_state="NO OPER"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-else
-PORTS_OTHER=$((PORTS_OTHER + 1))
-fi
-else
+;;
+"")
 actual_state="NOT FOUND"
 PORTS_OTHER=$((PORTS_OTHER + 1))
-fi
-fi
+;;
+*)
+actual_state="$parsed_state"
+PORTS_OTHER=$((PORTS_OTHER + 1))
+;;
+esac
 
 log_raw " | ${port_display} | *** ${actual_state} *** | --- | EXPECTED UP"
 EXPECTED_MISSING=$((EXPECTED_MISSING + 1))
@@ -432,7 +662,7 @@ fi
 TOTAL_PORTS_CHECKED=$((TOTAL_PORTS_CHECKED + 1))
 done
 
-log_raw " +------------+----------+------+"
+log_raw " +------------+----------------------+------+"
 log ""
 
 if [[ $EXPECTED_MISSING -gt 0 ]]; then
@@ -462,9 +692,9 @@ if [[ ${#SFP_PORTS[@]} -eq 0 ]]; then
 log " No up ports to check SFP diagnostics on."
 else
 log ""
-log_raw " +------------+-------------+-------------+--------+------------------+"
+log_raw " +------------+-------------+-------------+--------+--------------------------+"
 log_raw " | Interface | RX Pwr(dBm) | TX Pwr(dBm) | Status | Detail |"
-log_raw " +------------+-------------+-------------+--------+------------------+"
+log_raw " +------------+-------------+-------------+--------+--------------------------+"
 
 for port_intf in "${SFP_PORTS[@]}"; do
 sfp_output=$(run_cmd "show interface ${port_intf} transceiver details" "SFP diagnostics for ${port_intf}" 2>/dev/null) || {
@@ -473,21 +703,7 @@ SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
 continue
 }
 
-rx_dbm=""
-if echo "$sfp_output" | grep -qi "Rx Power"; then
-rx_line=$(echo "$sfp_output" | grep -i "Rx Power" | head -1)
-if [[ "$rx_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
-rx_dbm="${BASH_REMATCH[1]}"
-fi
-fi
-
-tx_dbm=""
-if echo "$sfp_output" | grep -qi "Tx Power"; then
-tx_line=$(echo "$sfp_output" | grep -i "Tx Power" | head -1)
-if [[ "$tx_line" =~ (-?[0-9]+\.?[0-9]*)[[:space:]]*dBm ]]; then
-tx_dbm="${BASH_REMATCH[1]}"
-fi
-fi
+IFS='|' read -r sfp_parse_status rx_dbm tx_dbm <<< "$(parse_cisco_sfp_output "$sfp_output")"
 
 port_display=$(printf "%-10s" "$port_intf")
 rx_display=$(printf "%-11s" "${rx_dbm:-N/A}")
@@ -495,11 +711,27 @@ tx_display=$(printf "%-11s" "${tx_dbm:-N/A}")
 status="OK"
 detail=""
 
-if [[ -z "$rx_dbm" || -z "$tx_dbm" ]]; then
+case "$sfp_parse_status" in
+BOTH)
+;;
+RX_ONLY)
 status="UNKNOWN"
-detail="Could not parse power"
+detail="TX power parse failed"
 SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
-else
+;;
+TX_ONLY)
+status="UNKNOWN"
+detail="RX power parse failed"
+SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
+;;
+NONE|*)
+status="UNKNOWN"
+detail="Both power parses failed"
+SFP_UNKNOWN=$((SFP_UNKNOWN + 1))
+;;
+esac
+
+if [[ "$status" != "UNKNOWN" ]]; then
 if float_lt "$rx_dbm" "$RX_CRIT_DBM" 2>/dev/null; then
 status="CRIT"
 detail="RX below ${RX_CRIT_DBM}"
@@ -525,7 +757,7 @@ fi
 
 [[ -z "$detail" ]] && detail="Clean"
 status_display=$(printf "%-6s" "$status")
-detail_display=$(printf "%-16s" "$detail")
+detail_display=$(printf "%-24s" "$detail")
 log_raw " | ${port_display} | ${rx_display} | ${tx_display} | ${status_display} | ${detail_display} |"
 
 echo "--- transceiver ${port_intf} ---" >> "$LOG_FILE"
@@ -535,7 +767,7 @@ echo "--- end transceiver ${port_intf} ---" >> "$LOG_FILE"
 sleep 1
 done
 
-log_raw " +------------+-------------+-------------+--------+------------------+"
+log_raw " +------------+-------------+-------------+--------+--------------------------+"
 log ""
 
 [[ $SFP_CRIT -gt 0 ]] && log " !!! CRITICAL: ${SFP_CRIT} port(s) with critical SFP power levels — check cables!"
@@ -560,21 +792,15 @@ echo "$PORTERR_OUTPUT" >> "$LOG_FILE"
 PORTS_WITH_ERRORS=0
 for port_intf in "${SORTED_EXPECTED[@]}"; do
 if [[ -n "${UP_PORT_MAP[$port_intf]+_}" ]]; then
-err_line=$(echo "$PORTERR_OUTPUT" | grep -E "^[[:space:]]*${port_intf}[[:space:]]" | head -1 || true)
-if [[ -n "$err_line" ]]; then
-has_errors=false
-err_values=$(echo "$err_line" | awk '{for(i=2;i<=NF;i++) print $i}')
-for val in $err_values; do
-if [[ "$val" =~ ^[0-9]+$ && "$val" -gt 0 ]]; then
-has_errors=true
-break
-fi
-done
-if [[ "$has_errors" == true ]]; then
+err_values=$(get_cisco_error_values_for_port "$port_intf" "$PORTERR_OUTPUT" || true)
+if [[ -n "$err_values" ]]; then
+if cisco_error_values_have_nonzero_errors "$err_values"; then
 log " !!! Port ${port_intf}: Non-zero error counters detected"
-log " ${err_line}"
+log " ${port_intf}: ${err_values}"
 PORTS_WITH_ERRORS=$((PORTS_WITH_ERRORS + 1))
 fi
+else
+log " !!! Port ${port_intf}: Parser could not classify any error-counter row"
 fi
 fi
 done
@@ -606,23 +832,7 @@ FCNS_OUTPUT=$(run_cmd "show fcns database vsan ${VSAN}" "Collect FCNS database f
 echo "$FCNS_OUTPUT" >> "$LOG_FILE"
 fi
 
-declare -A ALIAS_WWNS
-CURRENT_ALIAS=""
-
-while IFS= read -r line || [[ -n "$line" ]]; do
-line=$(trim "$line")
-[[ -z "$line" || "$line" =~ ^# ]] && continue
-
-if [[ "$line" =~ ^alias:[[:space:]]*(.+)$ ]]; then
-CURRENT_ALIAS=$(trim "${BASH_REMATCH[1]}")
-elif [[ "$line" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){7}$ ]]; then
-if [[ -n "$CURRENT_ALIAS" ]]; then
-ALIAS_WWNS["${CURRENT_ALIAS}"]="$line"
-CURRENT_ALIAS=""
-fi
-fi
-done < "$ALIAS_FILE"
-
+load_alias_file "$ALIAS_FILE"
 TOTAL_ALIASES=${#ALIAS_WWNS[@]}
 log " Aliases loaded from ${ALIAS_FILE}: ${TOTAL_ALIASES}"
 
@@ -639,34 +849,12 @@ wwn="${ALIAS_WWNS[$alias_name]}"
 alias_display=$(printf "%-32s" "$alias_name")
 wwn_display=$(printf "%-23s" "$wwn")
 
-found=false
-found_intf="---"
-found_source="---"
+IFS='|' read -r match_status found_intf found_source <<< "$(parse_flogi_fcns_match "$wwn" "$FLOGI_OUTPUT" "$FCNS_OUTPUT")"
 
-if [[ -n "$FLOGI_OUTPUT" ]]; then
-flogi_line=$(echo "$FLOGI_OUTPUT" | grep -i "$wwn" | head -1 || true)
-if [[ -n "$flogi_line" ]]; then
-found=true
-found_source="FLOGI (local)"
-if [[ "$flogi_line" =~ (fc[0-9]+/[0-9]+) ]]; then
-found_intf="${BASH_REMATCH[1]}"
-fi
-fi
-fi
+intf_display=$(printf "%-10s" "${found_intf:----}")
+source_display=$(printf "%-14s" "${found_source:----}")
 
-if [[ "$found" == false && -n "$FCNS_OUTPUT" ]]; then
-fcns_line=$(echo "$FCNS_OUTPUT" | grep -i "$wwn" | head -1 || true)
-if [[ -n "$fcns_line" ]]; then
-found=true
-found_source="FCNS (remote)"
-found_intf="remote"
-fi
-fi
-
-intf_display=$(printf "%-10s" "$found_intf")
-source_display=$(printf "%-14s" "$found_source")
-
-if [[ "$found" == true ]]; then
+if [[ "$match_status" == "FOUND" ]]; then
 log_raw " | ${alias_display} | ${wwn_display} | YES | ${intf_display} | ${source_display} |"
 WWN_FOUND=$((WWN_FOUND + 1))
 else
