@@ -29,24 +29,14 @@
 # # Use a specific SSH private key
 # ./check_ports.sh --switch-ip 10.154.81.7 --ssh-key ~/.ssh/id_ed25519
 #
+# # Use a dedicated known_hosts file
+# ./check_ports.sh --switch-ip 10.154.81.7 --known-hosts-file ./known_hosts
+#
+# # Lab-only override: disable host key verification
+# ./check_ports.sh --switch-ip 10.154.81.7 --insecure-hostkey
+#
 # # Dry run — print commands without executing
 # ./check_ports.sh --switch-ip 10.154.81.7 --dry-run
-#
-# PORT FILE FORMAT (expected_ports.txt):
-# One port index per line. Comments (#) and blank lines are ignored.
-# 0
-# 1
-# 2
-# # Storage ports
-# 23
-# 24
-#
-# SFP POWER THRESHOLDS:
-# The script uses configurable thresholds for RX/TX power (in dBm).
-# Defaults are based on typical short-wave (SWL) 8G/16G/32G SFP specs:
-# RX Power: WARN < -14.0 dBm, CRIT < -17.0 dBm
-# TX Power: WARN < -8.0 dBm, CRIT < -12.0 dBm
-# These can be overridden via command-line options.
 ##############################################################################
 
 set -euo pipefail
@@ -55,13 +45,15 @@ set -euo pipefail
 SWITCH_IP=""
 SWITCH_USER="admin"
 SSH_KEY=""
+KNOWN_HOSTS_FILE=""
+INSECURE_HOSTKEY=false
 DRY_RUN=false
 LOG_FILE="portcheck_$(date +%Y%m%d_%H%M%S).log"
 
 # Port selection mode
-EXPECTED_PORTS="" # Comma-separated port indices
-PORT_FILE="" # File with port indices
-ALIAS_FILE="" # Optional: aliases.txt for WWN verification
+EXPECTED_PORTS=""
+PORT_FILE=""
+ALIAS_FILE=""
 
 # SFP power thresholds (dBm) — configurable
 RX_WARN_DBM="-14.0"
@@ -91,6 +83,8 @@ case "$1" in
 --switch-ip) SWITCH_IP="$2"; shift 2 ;;
 --switch-user) SWITCH_USER="$2"; shift 2 ;;
 --ssh-key) SSH_KEY="$2"; shift 2 ;;
+--known-hosts-file) KNOWN_HOSTS_FILE="$2"; shift 2 ;;
+--insecure-hostkey) INSECURE_HOSTKEY=true; shift ;;
 --ports) EXPECTED_PORTS="$2"; shift 2 ;;
 --port-file) PORT_FILE="$2"; shift 2 ;;
 --alias-file) ALIAS_FILE="$2"; shift 2 ;;
@@ -114,6 +108,8 @@ echo "Optional:"
 echo " --dry-run Print commands without executing"
 echo " --switch-user USER SSH username (default: admin)"
 echo " --ssh-key FILE SSH private key file"
+echo " --known-hosts-file FILE Use a dedicated known_hosts file"
+echo " --insecure-hostkey Disable host key verification (lab use only)"
 echo " --alias-file FILE Alias file for WWN login verification"
 echo " --rx-warn DBM RX power warning threshold (default: ${RX_WARN_DBM})"
 echo " --rx-crit DBM RX power critical threshold (default: ${RX_CRIT_DBM})"
@@ -153,6 +149,15 @@ local -a ssh_cmd=(ssh
 -o ConnectTimeout=15
 -o LogLevel=ERROR
 )
+
+if [[ "$INSECURE_HOSTKEY" == true ]]; then
+ssh_cmd+=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+else
+ssh_cmd+=(-o StrictHostKeyChecking=yes)
+if [[ -n "$KNOWN_HOSTS_FILE" ]]; then
+ssh_cmd+=(-o UserKnownHostsFile="$KNOWN_HOSTS_FILE")
+fi
+fi
 
 if [[ -n "$SSH_KEY" ]]; then
 ssh_cmd+=(-i "$SSH_KEY")
@@ -217,6 +222,13 @@ fi
 echo "============================================================"
 echo " Switch : ${SWITCH_IP} (user: ${SWITCH_USER})"
 echo " SSH Key : ${SSH_KEY:-default ssh agent / keychain}"
+if [[ "$INSECURE_HOSTKEY" == true ]]; then
+echo " Host Trust : INSECURE (host key verification disabled)"
+elif [[ -n "$KNOWN_HOSTS_FILE" ]]; then
+echo " Host Trust : strict verification using ${KNOWN_HOSTS_FILE}"
+else
+echo " Host Trust : strict verification using default known_hosts"
+fi
 echo " Log File : ${LOG_FILE}"
 echo " RX Thresholds: WARN < ${RX_WARN_DBM} dBm, CRIT < ${RX_CRIT_DBM} dBm"
 echo " TX Thresholds: WARN < ${TX_WARN_DBM} dBm, CRIT < ${TX_CRIT_DBM} dBm"
@@ -240,6 +252,11 @@ fi
 
 if [[ -n "$SSH_KEY" && ! -f "$SSH_KEY" ]]; then
 echo "ERROR: SSH key file not found: ${SSH_KEY}"
+exit 1
+fi
+
+if [[ -n "$KNOWN_HOSTS_FILE" && ! -f "$KNOWN_HOSTS_FILE" ]]; then
+echo "ERROR: Known hosts file not found: ${KNOWN_HOSTS_FILE}"
 exit 1
 fi
 
