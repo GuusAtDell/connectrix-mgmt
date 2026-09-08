@@ -376,6 +376,7 @@ local -a members_array=()
 local -A SEEN_ZONE_MEMBERS=()
 local brocade_members=""
 local member=""
+local zone_validation_errors=0
 
 if ! validate_brocade_object_name "$z_name"; then
 log "!!! PARSER ERROR: Zone name '${z_name}' contains unsupported characters"
@@ -418,6 +419,7 @@ SEEN_ZONE_MEMBERS["$member"]=1
 if [[ -z "${CREATED_ALIASES[$member]+_}" ]]; then
 log "!!! VALIDATION ERROR: Zone '${z_name}' references alias '${member}' which was NOT defined in ${ALIAS_FILE}"
 VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+zone_validation_errors=$((zone_validation_errors + 1))
 fi
 
 if [[ -z "$brocade_members" ]]; then
@@ -427,7 +429,7 @@ brocade_members="${brocade_members};${member}"
 fi
 done
 
-if [[ $VALIDATION_ERRORS -eq 0 && $actionable_zone_parse_errors -eq 0 ]]; then
+if [[ $zone_validation_errors -eq 0 ]]; then
 run_cmd "zonecreate '${z_name}', '${brocade_members}'" \
 "Create zone: ${z_name} (${#members_array[@]} members)"
 
@@ -438,16 +440,30 @@ fi
 
 while IFS= read -r line || [[ -n "$line" ]]; do
 line=$(trim "$line")
-[[ -z "$line" || "$line" =~ ^# ]] && continue
+[[ -z "$line" ]] && continue
+[[ $line == \#* ]] && continue
 
-if [[ "$line" =~ ^zone:[[:space:]]*(.+)$ ]]; then
+if [[ $line == zone:* ]]; then
 if [[ -n "$ZONE_NAME" ]]; then
 process_zone "$ZONE_NAME" "$ZONE_MEMBERS_RAW"
 fi
 
-ZONE_NAME=$(trim "${BASH_REMATCH[1]}")
+ZONE_NAME=$(trim "${line#zone:}")
+if [[ -z "$ZONE_NAME" ]]; then
+log "!!! PARSER ERROR: Empty zone name in ${ZONE_FILE}"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+ZONE_NAME=""
+ZONE_MEMBERS_RAW=""
+continue
+fi
+
 ZONE_MEMBERS_RAW=""
 else
+if [[ -z "$ZONE_NAME" ]]; then
+log "!!! PARSER ERROR: Zone member line found before first 'zone:' header: ${line}"
+actionable_zone_parse_errors=$((actionable_zone_parse_errors + 1))
+continue
+fi
 ZONE_MEMBERS_RAW+=" ${line}"
 fi
 done < "$ZONE_FILE"
