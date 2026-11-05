@@ -1,0 +1,9 @@
+# Global switch bootstrap only
+# Do NOT put VSAN-scoped settings in this file
+
+HOSTNAME: mds-hsbc-fabric-a-01
+DOMAIN_ID: 100
+DNS: 10.10.10.10
+DNS: 10.10.10.11
+NTP: 10.20.20.10
+NTP: 10.20.20.11

@@ -1,0 +1,1029 @@
+##################
+# All ports down #
+##################
+disable_all_ports: yes
+
+
+#######################
+# Switching Module  1 #
+#######################
+
+interface: fc1/1
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 100
+
+interface: fc1/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc1/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/22
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc1/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+#######################
+# Switching Module  2 #
+#######################
+
+interface: fc2/1
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 100
+
+interface: fc2/2
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc2/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc2/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/17
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/23
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc2/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+#######################
+# Switching Module  3 #
+#######################
+
+interface: fc3/1
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc3/2
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc3/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc3/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/16
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/18
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/44
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc3/48
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 20
+
+#######################
+# Switching Module  4 #
+#######################
+
+interface: fc4/1
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc4/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc4/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/16
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/21
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/23
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/44
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc4/48
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 20
+
+#######################
+# Switching Module  7 #
+#######################
+
+interface: fc7/1
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc7/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc7/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/16
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/17
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/18
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/22
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/25
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/27
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/28
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/41
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/42
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/44
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc7/48
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 20
+
+#######################
+# Switching Module  8 #
+#######################
+
+interface: fc8/1
+admin_state: up
+mode: f
+access_vsan: 100
+
+interface: fc8/3
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/5
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/6
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc8/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/12
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/13
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/15
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/17
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/18
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/20
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/23
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/25
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/27
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/28
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/32
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/39
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/40
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/41
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/42
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/44
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc8/48
+admin_state: up
+mode: e
+trunk: on
+allowed_vsans: 20
+
+#######################
+# Switching Module  9 #
+#######################
+
+interface: fc9/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc9/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc9/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc9/9
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/11
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/12
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/25
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/27
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/31
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/37
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc9/44
+admin_state: up
+mode: f
+access_vsan: 20
+
+#######################
+# Switching Module 10 #
+#######################
+
+interface: fc10/4
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc10/7
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc10/8
+admin_state: up
+mode: f
+access_vsan: 50
+
+interface: fc10/10
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/12
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/14
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/16
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/17
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/19
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/29
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/30
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/33
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/35
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/37
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/43
+admin_state: up
+mode: f
+access_vsan: 20
+
+interface: fc10/44
+admin_state: up
+mode: f
+access_vsan: 20
+
