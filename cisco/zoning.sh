@@ -852,8 +852,10 @@ is_comment_or_blank "$line" && continue
 [[ "$line" =~ ^VSAN:[[:space:]]*[0-9]+$ ]] && continue
 
 if [[ "$line" =~ ^zone:[[:space:]]*(.+)$ ]]; then
+# Capture before process_zone runs further =~ tests that reset BASH_REMATCH
+new_zone_name=$(trim "${BASH_REMATCH[1]}")
 [[ -n "$ZONE_NAME" ]] && process_zone "$ZONE_NAME" "$ZONE_MEMBERS_RAW"
-ZONE_NAME=$(trim "${BASH_REMATCH[1]}")
+ZONE_NAME="$new_zone_name"
 ZONE_MEMBERS_RAW=""
 else
 ZONE_MEMBERS_RAW+=" ${line}"
