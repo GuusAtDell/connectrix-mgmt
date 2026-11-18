@@ -18,6 +18,8 @@
 # - hostname is global only, never VSAN-scoped
 # - disable_all_ports: yes is an explicit reset action
 # - --debug enables detailed phase and parser logging
+# - --dry-run shows intent in a human-readable way
+# - --generate-script <file> emits runnable switch CLI to screen and tees it to <file>
 ##############################################################################
 
 set -euo pipefail
@@ -39,6 +41,8 @@ BASE_CONFIG_FILE=""
 VSAN_CONFIG_FILE=""
 PORT_CONFIG_FILE=""
 DRY_RUN=false
+GENERATE_SCRIPT=false
+GENERATE_SCRIPT_FILE=""
 LOG_FILE="zoning_$(date +%Y%m%d_%H%M%S).log"
 
 RUN_BASE=false
@@ -50,6 +54,11 @@ RUN_ZONING=false
 log() {
 local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 echo "$msg" | tee -a "$LOG_FILE"
+}
+
+emit_script_line() {
+# raw runnable output, no timestamps or prefixes
+printf '%s\n' "$1" | tee -a "$GENERATE_SCRIPT_FILE"
 }
 
 debug() {
@@ -64,21 +73,28 @@ log "DEBUG: SWITCH_NAME=$SWITCH_NAME"
 log "DEBUG: SWITCH_IP=$SWITCH_IP"
 log "DEBUG: SWITCH_USER=$SWITCH_USER"
 log "DEBUG: DRY_RUN=$DRY_RUN"
+log "DEBUG: GENERATE_SCRIPT=$GENERATE_SCRIPT"
+log "DEBUG: GENERATE_SCRIPT_FILE=${GENERATE_SCRIPT_FILE:- (none)}"
 log "DEBUG: DEBUG=$DEBUG"
 log "DEBUG: VSAN=$VSAN"
 log "DEBUG: VSAN_CLI_SET=$VSAN_CLI_SET"
 log "DEBUG: RUN_BASE=$RUN_BASE RUN_VSAN=$RUN_VSAN RUN_PORT=$RUN_PORT RUN_ZONING=$RUN_ZONING"
-log "DEBUG: BASE_CONFIG_FILE=${BASE_CONFIG_FILE:-<none>}"
-log "DEBUG: VSAN_CONFIG_FILE=${VSAN_CONFIG_FILE:-<none>}"
-log "DEBUG: PORT_CONFIG_FILE=${PORT_CONFIG_FILE:-<none>}"
-log "DEBUG: ALIAS_FILE=${ALIAS_FILE:-<none>}"
-log "DEBUG: ZONE_FILE=${ZONE_FILE:-<none>}"
-log "DEBUG: CFG_FILE=${CFG_FILE:-<none>}"
+log "DEBUG: BASE_CONFIG_FILE=${BASE_CONFIG_FILE:- (none)}"
+log "DEBUG: VSAN_CONFIG_FILE=${VSAN_CONFIG_FILE:- (none)}"
+log "DEBUG: PORT_CONFIG_FILE=${PORT_CONFIG_FILE:- (none)}"
+log "DEBUG: ALIAS_FILE=${ALIAS_FILE:- (none)}"
+log "DEBUG: ZONE_FILE=${ZONE_FILE:- (none)}"
+log "DEBUG: CFG_FILE=${CFG_FILE:- (none)}"
 }
 
 while [[ $# -gt 0 ]]; do
 case "$1" in
 --dry-run) DRY_RUN=true; shift ;;
+--generate-script)
+GENERATE_SCRIPT=true
+[[ $# -ge 2 ]] || { echo "ERROR: --generate-script requires an output filename" >&2; exit 1; }
+GENERATE_SCRIPT_FILE="$2"
+shift 2 ;;
 --debug) DEBUG=true; shift ;;
 --switch-name) SWITCH_NAME="$2"; shift 2 ;;
 --switch-ip) SWITCH_IP="$2"; shift 2 ;;
@@ -95,55 +111,70 @@ case "$1" in
 --port-config-file) PORT_CONFIG_FILE="$2"; RUN_PORT=true; shift 2 ;;
 --log-file) LOG_FILE="$2"; shift 2 ;;
 -h|--help)
-cat <<EOF
-Usage: $0 [OPTIONS]
-
-Options:
---dry-run
---debug
---switch-name NAME
---switch-ip IP
---switch-user USER
---ssh-key FILE
---known-hosts-file FILE
---insecure-hostkey
---vsan VSAN
---alias-file FILE
---zone-file FILE
---cfg-file FILE
---base-config-file FILE
---vsan-config-file FILE
---port-config-file FILE
---log-file FILE
-EOF
-exit 0
-;;
-*) echo "Unknown option: $1"; exit 1 ;;
+printf '%s\n' \
+  "Usage: $0 [options]" \
+  "  --dry-run" \
+  "  --generate-script <file>" \
+  "  --debug" \
+  "  --switch-name <name>" \
+  "  --switch-ip <ip>" \
+  "  --switch-user <user>" \
+  "  --ssh-key <file>" \
+  "  --known-hosts-file <file>" \
+  "  --insecure-hostkey" \
+  "  --vsan <id>" \
+  "  --alias-file <file>" \
+  "  --zone-file <file>" \
+  "  --cfg-file <file>" \
+  "  --base-config-file <file>" \
+  "  --vsan-config-file <file>" \
+  "  --port-config-file <file>" \
+  "  --log-file <file>"exit 0 ;;
+*)
+log "ERROR: Unknown argument: $1"
+exit 1 ;;
 esac
 done
 
-# ========================= SSH HELPERS ================================
-build_ssh_cmd() {
-local -a ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=15 -o LogLevel=ERROR)
-
-if [[ "$INSECURE_HOSTKEY" == true ]]; then
-ssh_cmd+=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-else
-ssh_cmd+=(-o StrictHostKeyChecking=yes)
-[[ -n "$KNOWN_HOSTS_FILE" ]] && ssh_cmd+=(-o UserKnownHostsFile="$KNOWN_HOSTS_FILE")
+if [[ "$DRY_RUN" == true && "$GENERATE_SCRIPT" == true ]]; then
+log "ERROR: --dry-run and --generate-script are mutually exclusive"
+exit 1
 fi
 
-[[ -n "$SSH_KEY" ]] && ssh_cmd+=(-i "$SSH_KEY")
-ssh_cmd+=("${SWITCH_USER}@${SWITCH_IP}")
-debug "SSH command prepared for ${SWITCH_USER}@${SWITCH_IP}"
-printf '%s\n' "${ssh_cmd[@]}"
+if [[ "$GENERATE_SCRIPT" == true && -z "$GENERATE_SCRIPT_FILE" ]]; then
+log "ERROR: --generate-script requires an output filename"
+exit 1
+fi
+
+# ========================= SSH ========================================
+build_ssh_cmd() {
+local -a cmd=(ssh)
+cmd+=("-o" "BatchMode=yes")
+cmd+=("-o" "ConnectTimeout=10")
+
+if [[ "$INSECURE_HOSTKEY" == true ]]; then
+cmd+=("-o" "StrictHostKeyChecking=no")
+cmd+=("-o" "UserKnownHostsFile=/dev/null")
+elif [[ -n "$KNOWN_HOSTS_FILE" ]]; then
+cmd+=("-o" "UserKnownHostsFile=$KNOWN_HOSTS_FILE")
+fi
+
+[[ -n "$SSH_KEY" ]] && cmd+=("-i" "$SSH_KEY")
+cmd+=("${SWITCH_USER}@${SWITCH_IP}")
+printf '%s\n' "${cmd[@]}"
 }
 
 run_cmd() {
 local cmd="$1"
 local description="${2:-}"
-[[ -n "$description" ]] && log "# $description"
+[[ -n "$description" && "$GENERATE_SCRIPT" == false ]] && log "# $description"
 debug "run_cmd invoked with: $cmd"
+
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+emit_script_line "$cmd"
+return 0
+fi
+
 log ">>> $cmd"
 
 if [[ "$DRY_RUN" == false ]]; then
@@ -174,15 +205,35 @@ mapfile -t ssh_cmd < <(build_ssh_cmd)
 run_config_block() {
 local cmds="$1"
 local description="${2:-}"
-[[ -n "$description" ]] && log "# $description"
+[[ -n "$description" && "$GENERATE_SCRIPT" == false ]] && log "# $description"
 debug "run_config_block start"
+
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+emit_script_line "configure terminal"
+while IFS= read -r line; do
+[[ -z "$line" ]] && continue
+emit_script_line "$line"
+done <<< "$cmds"
+emit_script_line "end"
+return 0
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+log "DRY-RUN: would enter configuration mode"
+while IFS= read -r line; do
+[[ -z "$line" ]] && continue
+log "DRY-RUN: $line"
+done <<< "$cmds"
+debug "dry-run mode: config block not executed"
+log ""
+return 0
+fi
 
 while IFS= read -r line; do
 [[ -z "$line" ]] && continue
 log ">>> (config) $line"
 done <<< "$cmds"
 
-if [[ "$DRY_RUN" == false ]]; then
 local output payload
 local -a ssh_cmd
 mapfile -t ssh_cmd < <(build_ssh_cmd)
@@ -194,17 +245,20 @@ exit 1
 }
 [[ -n "$output" ]] && log "$output"
 sleep 1
-else
-debug "dry-run mode: config block not executed"
-fi
 log ""
 }
 
 run_cmd_confirm() {
 local cmd="$1"
 local description="${2:-}"
-[[ -n "$description" ]] && log "# $description"
+[[ -n "$description" && "$GENERATE_SCRIPT" == false ]] && log "# $description"
 debug "run_cmd_confirm invoked with: $cmd"
+
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+emit_script_line "$cmd"
+return 0
+fi
+
 log ">>> $cmd (with auto-confirm)"
 
 if [[ "$DRY_RUN" == false ]]; then
@@ -447,6 +501,33 @@ printf '%s' "$block"
 PORT_DISABLE_ALL=false
 declare -a PORT_CONFIG_BLOCKS=()
 
+discover_fc_interfaces() {
+local discovered=()
+
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+printf '%s\n' ""
+return 0
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+printf '%s\n' ""
+return 0
+fi
+
+local output
+output=$(run_cmd_capture "show interface brief | include ^fc")
+while IFS= read -r line; do
+local iface
+iface=$(awk '{print $1}' <<< "$line")
+[[ -z "$iface" ]] && continue
+if is_valid_fc_interface "$iface"; then
+discovered+=("$iface")
+fi
+done <<< "$output"
+
+printf '%s\n' "${discovered[@]}"
+}
+
 parse_port_config() {
 [[ "$RUN_PORT" == false ]] && return 0
 debug "parse_port_config start"
@@ -541,25 +622,34 @@ debug "parse_port_config end: PORT_DISABLE_ALL=$PORT_DISABLE_ALL blocks=${#PORT_
 
 build_disable_all_ports_block() {
 local block=""
-local output line iface
 debug "build_disable_all_ports_block start"
 
-if [[ "$DRY_RUN" == true ]]; then
-block+="! disable_all_ports requested; blanket shutdown block omitted in dry-run without live interface discovery"$'\n'
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+block+="! example only: live discovery is not available in generate-script mode"$'\n'
+block+="! show interface brief | include ^fc"$'\n'
+block+="interface fcX/Y"$'\n'
+block+=" shutdown"$'\n'
+block+="exit"$'\n'
 printf '%s' "$block"
 return 0
 fi
 
-output=$(run_cmd_capture "show interface brief | include ^fc")
-while IFS= read -r line; do
-iface=$(awk '{print $1}' <<< "$line")
+if [[ "$DRY_RUN" == true ]]; then
+block+="DRY-RUN: would discover ports using: show interface brief | include ^fc"$'\n'
+block+="DRY-RUN: if ports are found, the script would emit interface/shutdown/exit for each"$'\n'
+printf '%s' "$block"
+return 0
+fi
+
+local discovered_ifaces=()
+mapfile -t discovered_ifaces < <(discover_fc_interfaces)
+local iface
+for iface in "${discovered_ifaces[@]}"; do
 [[ -z "$iface" ]] && continue
-if is_valid_fc_interface "$iface"; then
 block+="interface ${iface}"$'\n'
 block+=" shutdown"$'\n'
 block+="exit"$'\n'
-fi
-done <<< "$output"
+done
 
 debug "build_disable_all_ports_block end"
 printf '%s' "$block"
@@ -582,6 +672,11 @@ printf '%s' "$combined"
 }
 
 # ========================= PRE-FLIGHT =================================
+if [[ "$GENERATE_SCRIPT" == true ]]; then
+: > "$GENERATE_SCRIPT_FILE" || { echo "ERROR: Cannot write to $GENERATE_SCRIPT_FILE" >&2; exit 1; }
+fi
+
+if [[ "$GENERATE_SCRIPT" == false ]]; then
 log "======================================================================"
 if [[ "$DRY_RUN" == true ]]; then
 log " *** DRY RUN MODE — No commands will be sent ***"
@@ -590,17 +685,18 @@ log " *** LIVE MODE — Commands WILL be sent to the switch ***"
 fi
 log "======================================================================"
 log " Switch : ${SWITCH_NAME} (IP: ${SWITCH_IP}; user: ${SWITCH_USER})"
-log " Base File : ${BASE_CONFIG_FILE:-<none>}"
-log " VSAN File : ${VSAN_CONFIG_FILE:-<none>}"
-log " Port File : ${PORT_CONFIG_FILE:-<none>}"
-log " Alias File: ${ALIAS_FILE:-<none>}"
-log " Zone File : ${ZONE_FILE:-<none>}"
-log " Cfg File : ${CFG_FILE:-<none>}"
+log " Base File : ${BASE_CONFIG_FILE:- (none)}"
+log " VSAN File : ${VSAN_CONFIG_FILE:- (none)}"
+log " Port File : ${PORT_CONFIG_FILE:- (none)}"
+log " Alias File: ${ALIAS_FILE:- (none)}"
+log " Zone File : ${ZONE_FILE:- (none)}"
+log " Cfg File : ${CFG_FILE:- (none)}"
 log " Log File : ${LOG_FILE}"
 log "======================================================================"
 log ""
 
 debug_arg_dump
+fi
 
 debug "starting file validation"
 if [[ "$RUN_BASE" == true && ! -f "$BASE_CONFIG_FILE" ]]; then
@@ -621,6 +717,7 @@ if [[ "$RUN_ZONING" == true ]]; then
 [[ -f "$CFG_FILE" ]] || { log "ERROR: Config file not found: $CFG_FILE"; exit 1; }
 fi
 
+if [[ "$GENERATE_SCRIPT" == false ]]; then
 debug "checking binaries and optional files"
 if ! command -v ssh >/dev/null 2>&1; then
 log "ERROR: ssh is not installed or not in PATH."
@@ -635,6 +732,7 @@ if [[ -n "$KNOWN_HOSTS_FILE" && ! -f "$KNOWN_HOSTS_FILE" ]]; then
 log "ERROR: Known hosts file not found: ${KNOWN_HOSTS_FILE}"
 exit 1
 fi
+fi
 
 if [[ "$RUN_ZONING" == true ]]; then
 resolve_vsan
@@ -646,9 +744,11 @@ parse_port_config
 [[ "$VSAN" =~ ^[0-9]+$ ]] || { log "ERROR: VSAN must be numeric: ${VSAN}"; exit 1; }
 (( VSAN >= 1 && VSAN <= 4093 )) || { log "ERROR: VSAN out of range (1-4093): ${VSAN}"; exit 1; }
 
+if [[ "$GENERATE_SCRIPT" == false ]]; then
 log " Final VSAN : ${VSAN}"
 debug "preflight complete"
 log ""
+fi
 
 # ========================= EXECUTION ==================================
 if [[ "$RUN_BASE" == true ]]; then
@@ -667,7 +767,7 @@ if [[ "$RUN_PORT" == true ]]; then
 debug "entering RUN_PORT block"
 debug "PORT_DISABLE_ALL=$PORT_DISABLE_ALL"
 debug "PORT_CONFIG_BLOCKS=${#PORT_CONFIG_BLOCKS[@]}"
-if [[ "$PORT_DISABLE_ALL" == true && "$DRY_RUN" == false ]]; then
+if [[ "$PORT_DISABLE_ALL" == true && "$DRY_RUN" == false && "$GENERATE_SCRIPT" == false ]]; then
 log "WARNING: disable_all_ports: yes is enabled; blanket shutdown will run before per-port config"
 fi
 PORT_CONFIG_BLOCK=$(build_port_config_block)
@@ -778,7 +878,7 @@ is_comment_or_blank "$line" && continue
 if [[ "$line" =~ ^cfg:[[:space:]]*(.+)$ ]]; then
 [[ -n "$CFG_NAME" ]] && { log "ERROR: Multiple cfg definitions in ${CFG_FILE}"; exit 1; }
 CFG_NAME=$(trim "${BASH_REMATCH[1]}")
-else
+elif [[ -n "$line" ]]; then
 CFG_MEMBERS_RAW+=" ${line}"
 fi
 done < "$CFG_FILE"
@@ -809,5 +909,7 @@ run_cmd "show zone vsan ${VSAN}" "Show zone definitions"
 run_cmd "show zone status vsan ${VSAN}" "Show zone status"
 fi
 
+if [[ "$GENERATE_SCRIPT" == false ]]; then
 debug "script completed"
 log "Script completed successfully"
+fi

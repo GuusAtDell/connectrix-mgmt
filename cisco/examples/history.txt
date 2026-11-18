@@ -1,0 +1,3 @@
+zoning.sh --port-config-file ./D_port_config.txt --generate-script ./DEOA153287-port-config.sh
+zoning.sh --port-config-file ./LEV_port_config.txt --generate-script ./DEOB153288-port-config.sh
+zoning.sh --generate-script vsan20-config.sh --alias-file vsan20_alias.txt --zone-file vsan20_zone.txt --cfg-file vsan20_cfg.txt --vsan 20
