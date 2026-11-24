@@ -20,6 +20,10 @@
 # - --debug enables detailed phase and parser logging
 # - --dry-run shows intent in a human-readable way
 # - --generate-script <file> emits runnable switch CLI to screen and tees it to <file>
+# - --create-port-channel bundles the E ports from the port config file that
+#   carry --vsan into one trunking port-channel (ISL) instead of applying the
+#   normal per-port config; --rx-bbcredit sets extended rx buffer credits on
+#   the members and --port-channel-id overrides the default id (= VSAN)
 ##############################################################################
 
 set -euo pipefail
@@ -49,6 +53,10 @@ RUN_BASE=false
 RUN_VSAN=false
 RUN_PORT=false
 RUN_ZONING=false
+
+CREATE_PORT_CHANNEL=false
+PORT_CHANNEL_ID=""
+RX_BBCREDIT=""
 
 # ========================= LOGGING ====================================
 log() {
@@ -85,6 +93,7 @@ log "DEBUG: PORT_CONFIG_FILE=${PORT_CONFIG_FILE:- (none)}"
 log "DEBUG: ALIAS_FILE=${ALIAS_FILE:- (none)}"
 log "DEBUG: ZONE_FILE=${ZONE_FILE:- (none)}"
 log "DEBUG: CFG_FILE=${CFG_FILE:- (none)}"
+log "DEBUG: CREATE_PORT_CHANNEL=$CREATE_PORT_CHANNEL PORT_CHANNEL_ID=${PORT_CHANNEL_ID:- (none)} RX_BBCREDIT=${RX_BBCREDIT:- (none)}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -109,6 +118,9 @@ shift 2 ;;
 --base-config-file) BASE_CONFIG_FILE="$2"; RUN_BASE=true; shift 2 ;;
 --vsan-config-file) VSAN_CONFIG_FILE="$2"; RUN_VSAN=true; shift 2 ;;
 --port-config-file) PORT_CONFIG_FILE="$2"; RUN_PORT=true; shift 2 ;;
+--create-port-channel) CREATE_PORT_CHANNEL=true; shift ;;
+--port-channel-id) PORT_CHANNEL_ID="$2"; shift 2 ;;
+--rx-bbcredit) RX_BBCREDIT="$2"; shift 2 ;;
 --log-file) LOG_FILE="$2"; shift 2 ;;
 -h|--help)
 printf '%s\n' \
@@ -129,7 +141,13 @@ printf '%s\n' \
   "  --base-config-file <file>" \
   "  --vsan-config-file <file>" \
   "  --port-config-file <file>" \
-  "  --log-file <file>"exit 0 ;;
+  "  --create-port-channel      bundle the E ports carrying --vsan from" \
+  "                             --port-config-file into one ISL port-channel" \
+  "                             (requires --port-config-file and --vsan)" \
+  "  --port-channel-id <1-256>  port-channel number (default: the VSAN id)" \
+  "  --rx-bbcredit <n>          extended rx buffer credits per member port" \
+  "  --log-file <file>"
+exit 0 ;;
 *)
 log "ERROR: Unknown argument: $1"
 exit 1 ;;
@@ -144,6 +162,24 @@ fi
 if [[ "$GENERATE_SCRIPT" == true && -z "$GENERATE_SCRIPT_FILE" ]]; then
 log "ERROR: --generate-script requires an output filename"
 exit 1
+fi
+
+if [[ "$CREATE_PORT_CHANNEL" == true ]]; then
+[[ "$RUN_PORT" == true ]] || { log "ERROR: --create-port-channel requires --port-config-file"; exit 1; }
+[[ "$VSAN_CLI_SET" == true ]] || { log "ERROR: --create-port-channel requires --vsan"; exit 1; }
+if [[ "$RUN_BASE" == true || "$RUN_VSAN" == true || "$RUN_ZONING" == true ]]; then
+log "ERROR: --create-port-channel cannot be combined with base, VSAN or zoning files"
+exit 1
+fi
+if [[ -n "$RX_BBCREDIT" ]]; then
+[[ "$RX_BBCREDIT" =~ ^[1-9][0-9]*$ ]] || { log "ERROR: --rx-bbcredit must be a positive number: ${RX_BBCREDIT}"; exit 1; }
+fi
+if [[ -n "$PORT_CHANNEL_ID" ]]; then
+[[ "$PORT_CHANNEL_ID" =~ ^[1-9][0-9]*$ ]] && (( PORT_CHANNEL_ID <= 256 )) || { log "ERROR: --port-channel-id must be 1-256: ${PORT_CHANNEL_ID}"; exit 1; }
+fi
+else
+[[ -z "$RX_BBCREDIT" ]] || { log "ERROR: --rx-bbcredit is only valid with --create-port-channel"; exit 1; }
+[[ -z "$PORT_CHANNEL_ID" ]] || { log "ERROR: --port-channel-id is only valid with --create-port-channel"; exit 1; }
 fi
 
 # ========================= SSH ========================================
@@ -205,10 +241,18 @@ mapfile -t ssh_cmd < <(build_ssh_cmd)
 run_config_block() {
 local cmds="$1"
 local description="${2:-}"
+# optional exec-mode commands sent in the same session before "configure terminal"
+local pre_cmds="${3:-}"
 [[ -n "$description" && "$GENERATE_SCRIPT" == false ]] && log "# $description"
 debug "run_config_block start"
 
 if [[ "$GENERATE_SCRIPT" == true ]]; then
+if [[ -n "$pre_cmds" ]]; then
+while IFS= read -r line; do
+[[ -z "$line" ]] && continue
+emit_script_line "$line"
+done <<< "$pre_cmds"
+fi
 emit_script_line "configure terminal"
 while IFS= read -r line; do
 [[ -z "$line" ]] && continue
@@ -219,6 +263,12 @@ return 0
 fi
 
 if [[ "$DRY_RUN" == true ]]; then
+if [[ -n "$pre_cmds" ]]; then
+while IFS= read -r line; do
+[[ -z "$line" ]] && continue
+log "DRY-RUN: $line"
+done <<< "$pre_cmds"
+fi
 log "DRY-RUN: would enter configuration mode"
 while IFS= read -r line; do
 [[ -z "$line" ]] && continue
@@ -229,6 +279,12 @@ log ""
 return 0
 fi
 
+if [[ -n "$pre_cmds" ]]; then
+while IFS= read -r line; do
+[[ -z "$line" ]] && continue
+log ">>> $line"
+done <<< "$pre_cmds"
+fi
 while IFS= read -r line; do
 [[ -z "$line" ]] && continue
 log ">>> (config) $line"
@@ -237,7 +293,9 @@ done <<< "$cmds"
 local output payload
 local -a ssh_cmd
 mapfile -t ssh_cmd < <(build_ssh_cmd)
-payload=$'configure terminal\n'"${cmds}"$'\nend\n'
+payload=""
+[[ -n "$pre_cmds" ]] && payload+="${pre_cmds}"$'\n'
+payload+=$'configure terminal\n'"${cmds}"$'\nend\n'
 output=$(printf '%s' "$payload" | "${ssh_cmd[@]}" 2>&1) || {
 log "!!! CONFIG BLOCK FAILED"
 log "!!! Output: $output"
@@ -500,6 +558,13 @@ printf '%s' "$block"
 # ========================= PORT CONFIG ================================
 PORT_DISABLE_ALL=false
 declare -a PORT_CONFIG_BLOCKS=()
+# E ports seen in the port config file (parallel arrays), for --create-port-channel
+declare -a E_PORT_IFACES=()
+declare -a E_PORT_ADMIN=()
+declare -a E_PORT_TRUNK=()
+declare -a E_PORT_ALLOWED=()
+declare -a PC_MEMBERS=()
+declare -a PC_MEMBER_ADMIN=()
 
 discover_fc_interfaces() {
 local discovered=()
@@ -580,6 +645,13 @@ fi
 block+="exit"
 PORT_CONFIG_BLOCKS+=("$block")
 
+if [[ "$current_mode" == "E" ]]; then
+E_PORT_IFACES+=("$current_interface")
+E_PORT_ADMIN+=("$current_admin_state")
+E_PORT_TRUNK+=("$current_trunk")
+E_PORT_ALLOWED+=("$current_allowed_vsans")
+fi
+
 current_interface=""
 current_admin_state=""
 current_mode=""
@@ -652,6 +724,69 @@ block+="exit"$'\n'
 done
 
 debug "build_disable_all_ports_block end"
+printf '%s' "$block"
+}
+
+# Select the E ports whose trunk allowed list contains $VSAN into PC_MEMBERS.
+# Must run in the main shell (not a $(...) subshell) so PC_MEMBERS persists.
+select_port_channel_members() {
+local i iface
+PC_MEMBERS=()
+PC_MEMBER_ADMIN=()
+for i in "${!E_PORT_IFACES[@]}"; do
+iface="${E_PORT_IFACES[$i]}"
+if [[ "${E_PORT_TRUNK[$i]}" != "ON" ]]; then
+log "WARNING: ${iface} is an E port with trunk off; its VSAN is unknown, skipping it"
+continue
+fi
+[[ ",${E_PORT_ALLOWED[$i]}," == *",${VSAN},"* ]] || continue
+if [[ "${E_PORT_ALLOWED[$i]}" != "$VSAN" ]]; then
+log "INFO: ${iface} allows VSANs ${E_PORT_ALLOWED[$i]}; the port-channel will only allow VSAN ${VSAN}"
+fi
+PC_MEMBERS+=("$iface")
+PC_MEMBER_ADMIN+=("${E_PORT_ADMIN[$i]}")
+done
+debug "select_port_channel_members: ${PC_MEMBERS[*]:-(none)}"
+}
+
+build_port_channel_block() {
+local pc="$PORT_CHANNEL_ID"
+local block="" i iface
+debug "build_port_channel_block start pc=${pc} vsan=${VSAN} members=${PC_MEMBERS[*]}"
+
+[[ -n "$RX_BBCREDIT" ]] && block+="feature fcrxbbcredit extended"$'\n'
+
+# shut members while changing channel membership and credits
+for iface in "${PC_MEMBERS[@]}"; do
+block+="interface ${iface}"$'\n'
+block+=" shutdown"$'\n'
+block+="exit"$'\n'
+done
+
+block+="interface port-channel ${pc}"$'\n'
+block+=" switchport mode E"$'\n'
+block+=" switchport trunk mode on"$'\n'
+block+=" switchport trunk allowed vsan ${VSAN}"$'\n'
+block+=" channel mode active"$'\n'
+block+=" no shutdown"$'\n'
+block+="exit"$'\n'
+
+block+="vsan database"$'\n'
+block+=" vsan ${VSAN} interface port-channel ${pc}"$'\n'
+block+="exit"$'\n'
+
+for i in "${!PC_MEMBERS[@]}"; do
+iface="${PC_MEMBERS[$i]}"
+block+="interface ${iface}"$'\n'
+block+=" channel-group ${pc} force"$'\n'
+[[ -n "$RX_BBCREDIT" ]] && block+=" switchport fcrxbbcredit extended ${RX_BBCREDIT}"$'\n'
+if [[ "${PC_MEMBER_ADMIN[$i]}" == "UP" ]]; then
+block+=" no shutdown"$'\n'
+fi
+block+="exit"$'\n'
+done
+
+debug "build_port_channel_block end"
 printf '%s' "$block"
 }
 
@@ -744,6 +879,19 @@ parse_port_config
 [[ "$VSAN" =~ ^[0-9]+$ ]] || { log "ERROR: VSAN must be numeric: ${VSAN}"; exit 1; }
 (( VSAN >= 1 && VSAN <= 4093 )) || { log "ERROR: VSAN out of range (1-4093): ${VSAN}"; exit 1; }
 
+if [[ "$CREATE_PORT_CHANNEL" == true ]]; then
+if [[ -z "$PORT_CHANNEL_ID" ]]; then
+(( VSAN <= 256 )) || { log "ERROR: VSAN ${VSAN} is not a valid port-channel id (1-256); use --port-channel-id"; exit 1; }
+PORT_CHANNEL_ID="$VSAN"
+fi
+select_port_channel_members
+[[ ${#PC_MEMBERS[@]} -gt 0 ]] || { log "ERROR: No trunking E ports carrying VSAN ${VSAN} found in ${PORT_CONFIG_FILE}"; exit 1; }
+if [[ "$GENERATE_SCRIPT" == false ]]; then
+log " Port-channel: ${PORT_CHANNEL_ID} (VSAN ${VSAN}) members: ${PC_MEMBERS[*]}"
+log " Rx BB credit: ${RX_BBCREDIT:- (default)}"
+fi
+fi
+
 if [[ "$GENERATE_SCRIPT" == false ]]; then
 log " Final VSAN : ${VSAN}"
 debug "preflight complete"
@@ -763,7 +911,17 @@ VSAN_CONFIG_BLOCK=$(build_vsan_config_block)
 [[ -n "$VSAN_CONFIG_BLOCK" ]] && run_config_block "$VSAN_CONFIG_BLOCK" "Apply VSAN configuration"
 fi
 
-if [[ "$RUN_PORT" == true ]]; then
+if [[ "$CREATE_PORT_CHANNEL" == true ]]; then
+debug "entering CREATE_PORT_CHANNEL block"
+[[ "$PORT_DISABLE_ALL" == true ]] && log "INFO: disable_all_ports is ignored with --create-port-channel"
+PORT_CHANNEL_BLOCK=$(build_port_channel_block)
+# terminal dont-ask: "switchport trunk allowed vsan" may otherwise wait for y/n
+run_config_block "$PORT_CHANNEL_BLOCK" "Create port-channel ${PORT_CHANNEL_ID} for VSAN ${VSAN} ISL" "terminal dont-ask"
+run_cmd_confirm "copy running-config startup-config" "Save running config to startup"
+run_cmd "show port-channel summary" "Show port-channel summary"
+run_cmd "show interface port-channel ${PORT_CHANNEL_ID} trunk vsan ${VSAN}" "Show trunk state for VSAN ${VSAN}"
+[[ -n "$RX_BBCREDIT" ]] && run_cmd "show interface ${PC_MEMBERS[0]} bbcredit" "Show buffer credits on ${PC_MEMBERS[0]}"
+elif [[ "$RUN_PORT" == true ]]; then
 debug "entering RUN_PORT block"
 debug "PORT_DISABLE_ALL=$PORT_DISABLE_ALL"
 debug "PORT_CONFIG_BLOCKS=${#PORT_CONFIG_BLOCKS[@]}"
@@ -852,8 +1010,10 @@ is_comment_or_blank "$line" && continue
 [[ "$line" =~ ^VSAN:[[:space:]]*[0-9]+$ ]] && continue
 
 if [[ "$line" =~ ^zone:[[:space:]]*(.+)$ ]]; then
+# Capture before process_zone runs further =~ tests that reset BASH_REMATCH
+new_zone_name=$(trim "${BASH_REMATCH[1]}")
 [[ -n "$ZONE_NAME" ]] && process_zone "$ZONE_NAME" "$ZONE_MEMBERS_RAW"
-ZONE_NAME=$(trim "${BASH_REMATCH[1]}")
+ZONE_NAME="$new_zone_name"
 ZONE_MEMBERS_RAW=""
 else
 ZONE_MEMBERS_RAW+=" ${line}"
